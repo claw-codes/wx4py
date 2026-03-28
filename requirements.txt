@@ -1,0 +1,7 @@
+pywin32>=305
+comtypes>=1.2.0
+uiautomation
+pyperclip
+markdown
+beautifulsoup4
+requests
