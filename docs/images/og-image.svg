@@ -1,0 +1,75 @@
+<svg width="1200" height="630" viewBox="0 0 1200 630" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="98" y1="52" x2="1094" y2="578" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0A1524"/>
+      <stop offset="1" stop-color="#07101A"/>
+    </linearGradient>
+    <radialGradient id="glowA" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(248 118) rotate(29.4) scale(468 246)">
+      <stop stop-color="#3FD16A" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#3FD16A" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowB" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1016 136) rotate(146.1) scale(280 210)">
+      <stop stop-color="#95ECAC" stop-opacity="0.14"/>
+      <stop offset="1" stop-color="#95ECAC" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="line" x1="92" y1="0" x2="1108" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3FD16A" stop-opacity="0"/>
+      <stop offset="0.52" stop-color="#3FD16A" stop-opacity="0.58"/>
+      <stop offset="1" stop-color="#95ECAC" stop-opacity="0.72"/>
+    </linearGradient>
+    <linearGradient id="title" x1="146" y1="244" x2="792" y2="244" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F8FBFF"/>
+      <stop offset="0.62" stop-color="#E2F4E6"/>
+      <stop offset="1" stop-color="#CFF7D9"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="630" rx="32" fill="url(#bg)"/>
+  <rect width="1200" height="630" rx="32" fill="url(#glowA)"/>
+  <rect width="1200" height="630" rx="32" fill="url(#glowB)"/>
+
+  <g opacity="0.08">
+    <path d="M0 90H1200" stroke="#A3B7D4"/>
+    <path d="M0 190H1200" stroke="#A3B7D4"/>
+    <path d="M0 290H1200" stroke="#A3B7D4"/>
+    <path d="M0 390H1200" stroke="#A3B7D4"/>
+    <path d="M0 490H1200" stroke="#A3B7D4"/>
+    <path d="M120 0V630" stroke="#A3B7D4"/>
+    <path d="M320 0V630" stroke="#A3B7D4"/>
+    <path d="M520 0V630" stroke="#A3B7D4"/>
+    <path d="M720 0V630" stroke="#A3B7D4"/>
+    <path d="M920 0V630" stroke="#A3B7D4"/>
+    <path d="M1120 0V630" stroke="#A3B7D4"/>
+  </g>
+
+  <rect x="92" y="54" width="1016" height="522" rx="30" fill="#0D1827" fill-opacity="0.78" stroke="#173049"/>
+  <path d="M92 54H1108" stroke="url(#line)"/>
+
+  <rect x="144" y="98" width="386" height="42" rx="21" fill="#0D2214" stroke="#245A35"/>
+  <circle cx="168" cy="119" r="6" fill="#4EDB74"/>
+  <text x="186" y="125" fill="#D4E7D9" font-size="17" font-family="Segoe UI, PingFang SC, Microsoft YaHei, sans-serif" letter-spacing="1">微信 4.x 自动化 · OpenClaw 集成</text>
+
+  <text x="144" y="218" fill="#F0F9F2" font-size="58" font-weight="700" font-family="Segoe UI, PingFang SC, Microsoft YaHei, sans-serif">wx4py</text>
+  <text x="144" y="326" fill="url(#title)" font-size="52" font-weight="700" font-family="Segoe UI, PingFang SC, Microsoft YaHei, sans-serif">一句话操作微信 4.x</text>
+  <text x="144" y="386" fill="#A7BFAE" font-size="30" font-family="Segoe UI, PingFang SC, Microsoft YaHei, sans-serif">让 OpenClaw（龙虾）直接接管重复微信操作</text>
+
+  <g transform="translate(144 432)">
+    <rect width="156" height="46" rx="23" fill="#0F1E30" stroke="#1D3955"/>
+    <text x="28" y="29" fill="#D8E6F7" font-size="20" font-weight="700" font-family="Segoe UI, PingFang SC, Microsoft YaHei, sans-serif">微信群发</text>
+  </g>
+  <g transform="translate(320 432)">
+    <rect width="176" height="46" rx="23" fill="#0F1E30" stroke="#1D3955"/>
+    <text x="28" y="29" fill="#D8E6F7" font-size="20" font-weight="700" font-family="Segoe UI, PingFang SC, Microsoft YaHei, sans-serif">自动发文件</text>
+  </g>
+  <g transform="translate(516 432)">
+    <rect width="176" height="46" rx="23" fill="#0F1E30" stroke="#1D3955"/>
+    <text x="28" y="29" fill="#D8E6F7" font-size="20" font-weight="700" font-family="Segoe UI, PingFang SC, Microsoft YaHei, sans-serif">群公告更新</text>
+  </g>
+
+  <path d="M822 176C870 152 928 140 994 140C1044 140 1084 148 1110 160" stroke="#1E4B2C" stroke-width="2"/>
+  <path d="M788 242C858 214 934 204 1012 204C1050 204 1086 208 1110 214" stroke="#1A4428" stroke-width="2"/>
+  <path d="M760 318H1088" stroke="#1A4428" stroke-width="2"/>
+  <path d="M804 356C862 388 928 404 998 404C1044 404 1084 396 1110 382" stroke="#205130" stroke-width="2"/>
+
+  <text x="144" y="534" fill="#6F88A6" font-size="18" font-family="Segoe UI, PingFang SC, Microsoft YaHei, sans-serif">wx4py.biglongxia.com</text>
+</svg>
