@@ -9,7 +9,8 @@ from ..utils.win32 import (
     bring_window_to_front,
     get_window_title,
     get_window_class,
-    check_and_fix_registry
+    check_and_fix_registry,
+    restart_wechat_process,
 )
 from ..utils.logger import get_logger
 from ..config import OPERATION_INTERVAL
@@ -44,6 +45,7 @@ class WeChatWindow:
         """
         # Step 1: Check and fix registry
         logger.info("Checking registry for UI Automation...")
+        modified = False
         try:
             modified = check_and_fix_registry()
             if modified:
@@ -66,6 +68,24 @@ class WeChatWindow:
         # Step 3: Bring to front
         bring_window_to_front(self._hwnd)
         time.sleep(OPERATION_INTERVAL)
+
+        # Step 3.5: If accessibility registry was changed, restart WeChat and ask user to re-login.
+        # In practice this is more reliable than soft-refreshing a potentially white-screen helper window.
+        if modified:
+            logger.warning(
+                "RunningState changed during this connect; restarting WeChat for a clean UIA session."
+            )
+            restarted = restart_wechat_process(self._hwnd)
+            self.disconnect()
+            if restarted:
+                raise WeChatNotFoundError(
+                    "WeChat was restarted to apply accessibility settings. "
+                    "Please log in again, keep WeChat in the foreground, then retry."
+                )
+            raise WeChatNotFoundError(
+                "Accessibility settings changed and require a WeChat restart. "
+                "Please manually restart WeChat, log in again, then retry."
+            )
 
         # Step 4: Initialize UIAutomation
         logger.info("Initializing UIAutomation...")

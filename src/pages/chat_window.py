@@ -56,38 +56,59 @@ class ChatWindow(BasePage):
 
     # ==================== Private Methods ====================
 
-    def _get_search_edit(self):
-        """Get main search box control (not the one in group detail panel)"""
-        # Find all EditControls with correct class
-        edits = []
+    def _get_search_edit(self, retries: int = 3):
+        """Get main search box control (not the one in group detail panel)."""
+
         def find_edits(ctrl, results):
-            if (ctrl.ControlTypeName == 'EditControl' and
-                ctrl.ClassName == 'mmui::XValidatorTextEdit'):
-                results.append(ctrl)
-            for child in ctrl.GetChildren():
-                find_edits(child, results)
+            try:
+                if ctrl.ControlTypeName == 'EditControl':
+                    # Different WeChat builds may use different class names for search box.
+                    if ctrl.ClassName in ('mmui::XValidatorTextEdit', 'mmui::XTextEdit') or (ctrl.Name or '').find('搜索') >= 0:
+                        results.append(ctrl)
+                for child in ctrl.GetChildren():
+                    find_edits(child, results)
+            except Exception:
+                # Ignore transient UIA traversal errors
+                return
 
-        find_edits(self.root, edits)
+        for attempt in range(1, retries + 1):
+            edits = []
+            find_edits(self.root, edits)
 
-        for edit in edits:
-            if edit.Name != '搜索':
-                continue
+            for edit in edits:
+                # Some builds may not expose Name='搜索' consistently; allow blank name as fallback.
+                if edit.Name not in ('搜索', ''):
+                    continue
 
-            # Check if this is in group detail panel (ChatRoomMemberInfoView)
-            parent = edit.GetParentControl()
-            grandparent = parent.GetParentControl() if parent else None
+                # Check if this is in group detail panel (ChatRoomMemberInfoView)
+                parent = edit.GetParentControl()
+                grandparent = parent.GetParentControl() if parent else None
 
-            if grandparent and 'ChatRoomMemberInfoView' in (grandparent.ClassName or ''):
-                # This is "搜索群成员" in group detail panel
-                # Close the panel first
-                logger.debug("Group detail panel is open, closing...")
-                edit.SendKeys('{Esc}')
-                time.sleep(0.5)
-                continue
+                if grandparent and 'ChatRoomMemberInfoView' in (grandparent.ClassName or ''):
+                    # This is "搜索群成员" in group detail panel
+                    # Close the panel first
+                    logger.debug("Group detail panel is open, closing...")
+                    edit.SendKeys('{Esc}')
+                    time.sleep(0.5)
+                    continue
 
-            # This is the main search box
-            if edit.Exists(maxSearchSeconds=1):
-                return edit
+                # This is likely the main search box
+                if edit.Exists(maxSearchSeconds=1):
+                    return edit
+
+            # Recovery between attempts: try returning to main surface and refocus window
+            try:
+                self.root.SendKeys('{Esc}')
+                time.sleep(0.2)
+                self.root.SendKeys('{Esc}')
+                time.sleep(0.2)
+                # Force-open global search in some builds where search box is lazily created
+                self.root.SendKeys('{Ctrl}f')
+            except Exception:
+                pass
+            self._window.activate()
+            time.sleep(0.5)
+            logger.debug(f"Search box not found, retrying ({attempt}/{retries})")
 
         logger.warning("Search box not found")
         return None
@@ -182,7 +203,7 @@ class ChatWindow(BasePage):
         Returns:
             bool: True if successful
         """
-        search_edit = self._get_search_edit()
+        search_edit = self._get_search_edit(retries=3)
         if not search_edit:
             logger.error("Search box not found")
             return False
@@ -252,25 +273,38 @@ class ChatWindow(BasePage):
         group_name = GROUP_CHATS if target_type == 'group' else GROUP_CONTACTS
         logger.info(f"Opening chat: {target} (type: {target_type})")
 
-        # Search
-        results = self.search(target)
-
-        # Find in correct group
-        group_items = results.get(group_name, [])
         target_result = None
 
-        for item in group_items:
-            if target in item.name:
-                target_result = item
-                break
+        # Search with one retry to absorb transient UIA state (e.g. focus/panel glitch)
+        for attempt in range(1, 3):
+            results = self.search(target)
 
-        # If not found in expected group, try FUNCTIONS group (for File Transfer Helper etc.)
-        if not target_result and target_type == 'contact':
-            func_items = results.get(GROUP_FUNCTIONS, [])
-            for item in func_items:
+            # Find in correct group
+            group_items = results.get(group_name, [])
+            target_result = None
+
+            for item in group_items:
                 if target in item.name:
                     target_result = item
                     break
+
+            # If not found in expected group, try FUNCTIONS group (for File Transfer Helper etc.)
+            if not target_result and target_type == 'contact':
+                func_items = results.get(GROUP_FUNCTIONS, [])
+                for item in func_items:
+                    if target in item.name:
+                        target_result = item
+                        break
+
+            if target_result:
+                break
+
+            logger.warning(
+                f"'{target}' not found in '{group_name}' group (attempt {attempt}/2)"
+            )
+            self._clear_search()
+            self._window.activate()
+            time.sleep(0.8)
 
         if not target_result:
             logger.error(f"'{target}' not found in '{group_name}' group")

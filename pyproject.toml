@@ -1,6 +1,6 @@
 [project]
 name = "wx4py"
-version = "0.1.1"
+version = "0.1.2"
 description = "wx4py - Python 微信自动化工具"
 readme = "README.md"
 requires-python = ">=3.9"

@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
 """Win32 API utilities"""
+import time
+import os
+import subprocess
+
 import win32gui
 import win32con
-import win32api
+import win32process
 import winreg
 
 from ..core.exceptions import RegistryError
@@ -55,24 +59,146 @@ def check_and_fix_registry() -> bool:
         raise RegistryError(f"Failed to access registry: {e}")
 
 
+def _get_process_image_name(pid: int) -> str:
+    """Best-effort resolve executable full path by pid."""
+    import ctypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    open_process.restype = ctypes.c_void_p
+
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [ctypes.c_void_p]
+    close_handle.restype = ctypes.c_int
+
+    query_name = kernel32.QueryFullProcessImageNameW
+    query_name.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_wchar_p,
+        ctypes.POINTER(ctypes.c_uint32),
+    ]
+    query_name.restype = ctypes.c_int
+
+    handle = open_process(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid)
+    if not handle:
+        return ""
+
+    try:
+        size = ctypes.c_uint32(1024)
+        buf = ctypes.create_unicode_buffer(1024)
+        ok = query_name(handle, 0, buf, ctypes.byref(size))
+        return buf.value if ok else ""
+    finally:
+        close_handle(handle)
+
+
+def _wechat_window_score(hwnd: int, title: str, class_name: str, exe_path: str) -> int:
+    """Score a candidate top-level window; higher means more likely main WeChat."""
+    score = 0
+    exe_name = os.path.basename(exe_path).lower()
+
+    if exe_name in {"weixin.exe", "wechat.exe"}:
+        score += 100
+    if exe_name == "wechatappex.exe":
+        score -= 200
+
+    if class_name.startswith("Qt"):
+        score += 30
+    if "微信" in title:
+        score += 10
+
+    if not win32gui.IsWindowVisible(hwnd):
+        score -= 20
+
+    return score
+
+
 def find_wechat_window() -> int | None:
     """
     Find WeChat main window handle.
 
+    Avoid selecting WeChatAppEx (white screen helper window) when both
+    helper and main Weixin window are present.
+
     Returns:
         int | None: Window handle or None if not found
     """
-    # Method 1: By title
-    hwnd = win32gui.FindWindow(None, '微信')
-    if hwnd:
-        return hwnd
+    candidates: list[tuple[int, int, str, str, str]] = []
 
-    # Method 2: By class name
+    def _enum_cb(hwnd, _):
+        title = win32gui.GetWindowText(hwnd) or ""
+        class_name = win32gui.GetClassName(hwnd) or ""
+
+        # Quick prefilter to reduce process lookups
+        if ("微信" not in title) and (not class_name.startswith("Qt")) and ("WeChat" not in class_name):
+            return True
+
+        try:
+            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            exe_path = _get_process_image_name(pid)
+        except Exception:
+            pid = 0
+            exe_path = ""
+
+        score = _wechat_window_score(hwnd, title, class_name, exe_path)
+        if score > -150:
+            candidates.append((score, hwnd, title, class_name, exe_path))
+        return True
+
+    win32gui.EnumWindows(_enum_cb, None)
+
+    if candidates:
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        return candidates[0][1]
+
+    # Legacy fallback
     hwnd = win32gui.FindWindow('Qt51514QWindowIcon', None)
     if hwnd:
         return hwnd
 
+    hwnd = win32gui.FindWindow(None, '微信')
+    if hwnd:
+        return hwnd
+
     return None
+
+
+def restart_wechat_process(hwnd: int) -> bool:
+    """
+    Restart WeChat process for a specific window handle.
+
+    Args:
+        hwnd: WeChat window handle
+
+    Returns:
+        bool: True if restart command succeeded
+    """
+    try:
+        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        exe_path = _get_process_image_name(pid)
+        if not exe_path or not os.path.exists(exe_path):
+            return False
+
+        # Terminate current process tree
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+        time.sleep(1.0)
+
+        # Relaunch WeChat executable
+        subprocess.Popen([exe_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(1.0)
+        return True
+    except Exception:
+        return False
 
 
 def bring_window_to_front(hwnd: int) -> bool:
