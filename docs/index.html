@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>wx4py | OpenClaw（龙虾）一句话操作微信 4.x</title>
+  <meta name="description" content="wx4py 是一个面向中文用户的微信 4.x 自动化工具，可批量微信群发、自动发文件、批量修改群公告、导出聊天记录，并支持通过 OpenClaw（龙虾）或 Claude Code 用自然语言直接操作微信。">
+  <meta name="keywords" content="wx4py, 微信 4.x 自动化, OpenClaw, 龙虾, 微信机器人, 微信自动化机器人, 微信群发, 微信自动发文件, 微信群公告, 聊天记录导出">
+  <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+  <meta name="googlebot" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+  <meta name="theme-color" content="#0b1020">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="wx4py | OpenClaw（龙虾）一句话操作微信 4.x">
+  <meta property="og:description" content="让微信群发、发文件、改公告、导出聊天记录这些重复操作自动化，也可以直接让 OpenClaw 用自然语言帮你操作微信。">
+  <meta property="og:url" content="https://claw-codes.github.io/wx4py/">
+  <meta property="og:image" content="https://claw-codes.github.io/wx4py/images/logo.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="wx4py | OpenClaw（龙虾）一句话操作微信 4.x">
+  <meta name="twitter:description" content="微信 4.x 自动化工具，支持微信群发、自动发文件、群公告更新、聊天记录导出和 OpenClaw 自然语言操作。">
+  <meta name="twitter:image" content="https://claw-codes.github.io/wx4py/images/logo.png">
+  <link rel="icon" type="image/png" href="./images/logo.png">
+  <link rel="apple-touch-icon" href="./images/logo.png">
+  <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "wx4py",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "Windows 10, Windows 11",
+      "description": "wx4py 是一个微信 4.x 自动化工具，支持批量微信群发、自动发文件、批量修改群公告、导出聊天记录，并可接入 OpenClaw（龙虾）或 Claude Code 通过自然语言直接操作微信。",
+      "url": "https://claw-codes.github.io/wx4py/",
+      "image": "https://claw-codes.github.io/wx4py/images/logo.png",
+      "softwareVersion": "0.1.0",
+      "downloadUrl": "https://github.com/claw-codes/wx4py",
+      "codeRepository": "https://github.com/claw-codes/wx4py",
+      "license": "https://github.com/claw-codes/wx4py/blob/main/LICENSE",
+      "keywords": [
+        "wx4py",
+        "微信 4.x 自动化",
+        "OpenClaw",
+        "龙虾",
+        "微信机器人",
+        "微信自动化机器人",
+        "微信群发",
+        "微信自动发文件",
+        "微信群公告",
+        "聊天记录导出"
+      ],
+      "author": {
+        "@type": "Person",
+        "name": "claw-codes"
+      },
+      "publisher": {
+        "@type": "Person",
+        "name": "claw-codes"
+      },
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+      }
+    }
+  </script>
+  <link rel="preload" href="./styles.css" as="style">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到正文</a>
+
+  <header class="site-header">
+    <div class="container nav-shell">
+      <a class="brand" href="#top" aria-label="wx4py 首页">
+        <img class="brand-logo" src="./images/logo.png" alt="wx4py logo">
+        <span class="brand-text">wx4py</span>
+      </a>
+      <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" aria-label="展开导航">
+        <span></span>
+        <span></span>
+      </button>
+      <nav id="site-nav" class="site-nav" aria-label="主导航">
+        <a href="#scenarios">痛点与解决</a>
+        <a href="#features">为什么选它</a>
+        <a href="#quickstart">快速开始</a>
+        <a href="#faq">FAQ</a>
+        <a href="https://github.com/claw-codes/wx4py" target="_blank" rel="noopener noreferrer">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <section id="top" class="hero">
+      <div class="container hero-grid">
+        <div class="hero-copy">
+          <p class="eyebrow">微信 4.x 自动化 · OpenClaw / 龙虾集成</p>
+          <h1 class="hero-title">
+            <span>让 OpenClaw</span>
+            <span>一句话操作微信 4.x</span>
+          </h1>
+          <p class="hero-lead">
+            wx4py 把微信群发、自动发文件、批量改群公告、聊天记录导出这些重复操作收拢成一个可靠的 Windows 工具。
+            你可以写 Python，也可以直接让 OpenClaw 或 Claude Code 用自然语言帮你执行。
+          </p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="https://github.com/claw-codes/wx4py" target="_blank" rel="noopener noreferrer">查看源码</a>
+            <a class="button button-secondary" href="#quickstart">立即开始</a>
+          </div>
+          <ul class="hero-points" aria-label="关键信息">
+            <li>适用于 Windows 10 / 11</li>
+            <li>Python 3.9+</li>
+            <li>已测试微信 4.1.7.59、4.1.8.29</li>
+          </ul>
+        </div>
+        <div class="hero-panel reveal">
+          <div class="hero-card">
+            <div class="hero-card-top">
+              <span class="status-dot"></span>
+              <span>OpenClaw 操作示例</span>
+            </div>
+            <div class="chat-bubble user">帮我给文件传输助手发一条消息：测试成功</div>
+            <div class="chat-bubble bot">已连接微信，准备发送。</div>
+            <div class="terminal">
+              <div class="terminal-bar">
+                <span></span>
+                <span></span>
+                <span></span>
+              </div>
+              <pre><code>pip install wx4py
+
+from wx4py import WeChatClient
+
+with WeChatClient() as wx:
+    wx.chat_window.send_to("文件传输助手", "测试成功")</code></pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="scenarios" class="section section-alt">
+      <div class="container">
+        <div class="section-heading reveal">
+          <p class="eyebrow">真实痛点</p>
+          <h2>这些微信重复操作，wx4py 可以！</h2>
+        </div>
+        <div class="solution-grid">
+          <article class="solution-card reveal">
+            <h3>一个通知要发五六个群</h3>
+            <p>每次复制、搜索、切群、粘贴、发送，动作不复杂，但很耗神，也容易漏群。</p>
+            <p class="solution-answer"><strong>wx4py 可以：</strong>把同一条通知批量发到多个群，适合例会通知、日报提醒、运营播报。</p>
+          </article>
+          <article class="solution-card reveal">
+            <h3>同一个文件反复上传</h3>
+            <p>日报、周报、资料包分发给不同群时，最烦的是重复找文件、重复拖拽、重复确认。</p>
+            <p class="solution-answer"><strong>wx4py 可以：</strong>把同一份文件快速发给多个群或联系人，减少重复上传和重复确认。</p>
+          </article>
+          <article class="solution-card reveal">
+            <h3>群公告要一个个改</h3>
+            <p>项目群、部门群、值班群的公告内容经常同步更新，手工点进去改非常磨人。</p>
+            <p class="solution-answer"><strong>wx4py 可以：</strong>批量更新多个群公告，适合会议通知、排班提醒和规则同步。</p>
+          </article>
+          <article class="solution-card reveal">
+            <h3>聊天记录想导出来看看</h3>
+            <p>不是为了爬数据，而是想做基础分析、留档或者看看最近讨论都集中在哪些话题。</p>
+            <p class="solution-answer"><strong>wx4py 可以：</strong>导出聊天记录做后续分析，也能获取群成员列表辅助整理信息。</p>
+          </article>
+          <article class="solution-card reveal">
+            <h3>临时任务还要专门写脚本</h3>
+            <p>很多操作只做一次，但又不想手动点。这时候更希望直接说一句话，让 OpenClaw 帮你做完。</p>
+            <p class="solution-answer"><strong>wx4py 可以：</strong>接入 OpenClaw 或 Claude Code，让你直接用自然语言执行微信操作。</p>
+          </article>
+          <article class="solution-card reveal">
+            <h3>担心工具太重、太折腾</h3>
+            <p>很多自动化工具一上来就要配一堆环境、理解一堆概念，真正要解决的问题反而被拖慢了。</p>
+            <p class="solution-answer"><strong>wx4py 可以：</strong>用更轻量的方式接入微信 4.x，既能写 Python，也能直接交给 OpenClaw 处理。</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="features" class="section">
+      <div class="container">
+        <div class="section-heading reveal">
+          <p class="eyebrow">为什么用起来顺手</p>
+          <h2>为什么适合日常使用</h2>
+          <p>这一块不再重复群发、发文件这些功能，而是说明 wx4py 的使用方式和产品特性。</p>
+        </div>
+        <div class="feature-grid">
+          <article class="feature-card reveal">
+            <h3>面向微信 4.x</h3>
+            <p>定位明确，直接服务 Windows 桌面端微信 4.x，不是泛泛而谈的聊天自动化方案。</p>
+          </article>
+          <article class="feature-card reveal">
+            <h3>自然语言也能用</h3>
+            <p>不是只能自己写脚本。接入 OpenClaw 或 Claude Code 后，可以直接用自然语言下达操作。</p>
+          </article>
+          <article class="feature-card reveal">
+            <h3>脚本化能力完整</h3>
+            <p>如果你要做定时任务、批处理或二次开发，也可以继续走 Python 代码方式接入。</p>
+          </article>
+          <article class="feature-card reveal">
+            <h3>上手成本低</h3>
+            <p>官网和 README 都围绕真实任务组织，不需要先理解复杂框架再开始使用。</p>
+          </article>
+          <article class="feature-card reveal">
+            <h3>轻量且开源</h3>
+            <p>仓库结构直接、纯 Python、无后端依赖，适合自己看代码、调整脚本和长期维护。</p>
+          </article>
+          <article class="feature-card reveal">
+            <h3>适合一次性任务</h3>
+            <p>很多需求不是要搭系统，而是想立刻完成一次微信群发或文件分发，这正是它擅长的场景。</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="quickstart" class="section section-alt">
+      <div class="container">
+        <div class="section-heading reveal">
+          <p class="eyebrow">快速开始 / OpenClaw 集成</p>
+          <h2>把这段内容粘贴给 OpenClaw，它会自己完成安装和配置</h2>
+          <p>
+            wx4py 最适合的上手方式不是先写脚本，而是先把 skill 安装好。按 README 中的提示把下面这段话直接发给
+            OpenClaw，后续就可以用自然语言执行微信 4.x 自动化操作。
+          </p>
+        </div>
+        <div class="quickstart-grid">
+          <div class="code-showcase reveal">
+            <div class="code-header">
+              <div class="code-tabs" aria-hidden="true">
+                <span class="code-tab active">复制给 OpenClaw</span>
+              </div>
+              <button class="copy-button" type="button" data-copy-target="openclaw-install">复制内容</button>
+            </div>
+            <pre><code id="openclaw-install">安装并使用 wx4py skill。
+
+技能地址：https://raw.githubusercontent.com/claw-codes/wx4py/main/wx4-skill/SKILL.md
+
+1、执行命令 pip install wx4py 安装所需库。
+2、将 wx4py skill 安装至本地的 skills 目录，并配置所有涉及微信操作的场景均使用该技能。
+3、阅读 skill 文档后，向我说明如何与你进行对话以使用该技能。</code></pre>
+          </div>
+          <div class="prompt-card reveal">
+            <p class="prompt-label">安装后可以直接这样说</p>
+            <blockquote>“帮我给文件传输助手发一条消息：测试成功”</blockquote>
+            <p>如果你只是想先验证有没有跑通，这条指令最直接，也最容易看出效果。</p>
+            <div class="prompt-actions">
+              <button class="copy-button" type="button" data-copy-target="openclaw-prompt">复制示例</button>
+            </div>
+            <pre class="prompt-pre"><code id="openclaw-prompt">帮我给文件传输助手发一条消息：测试成功</code></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="requirements" class="section section-alt">
+      <div class="container">
+        <div class="section-heading reveal">
+          <p class="eyebrow">环境与限制</p>
+          <h2>部署和使用前需要知道的事</h2>
+        </div>
+        <div class="requirement-grid">
+          <article class="requirement-card reveal">
+            <h3>环境要求</h3>
+            <ul>
+              <li>Windows 10 / 11</li>
+              <li>Python 3.9+</li>
+              <li>微信 4.x</li>
+              <li>已测试 4.1.7.59、4.1.8.29</li>
+            </ul>
+          </article>
+          <article class="requirement-card reveal">
+            <h3>已知限制</h3>
+            <ul>
+              <li>操作时微信窗口需要保持前台</li>
+              <li>聊天记录暂时无法获取发送者信息</li>
+              <li>建议控制发送频率，避免大量群发营销内容</li>
+            </ul>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="faq" class="section">
+      <div class="container">
+        <div class="section-heading reveal">
+          <p class="eyebrow">FAQ</p>
+          <h2>常见问题</h2>
+        </div>
+        <div class="faq-list">
+          <details class="faq-item reveal">
+            <summary>会不会封号？</summary>
+            <p>wx4py 模拟的是桌面端真实操作，不修改微信客户端。但依然建议控制发送频率，避免大量群发营销内容，并先用非重要账号测试。</p>
+          </details>
+          <details class="faq-item reveal">
+            <summary>支持哪些微信版本？</summary>
+            <p>当前面向微信 4.x，已测试版本包括 4.1.7.59 和 4.1.8.29。</p>
+          </details>
+          <details class="faq-item reveal">
+            <summary>是否必须前台运行？</summary>
+            <p>是。执行操作时，微信窗口需要在前台，这是当前自动化方式的前提。</p>
+          </details>
+          <details class="faq-item reveal">
+            <summary>能否获取聊天发送者？</summary>
+            <p>暂时不能。微信 4.x 当前暴露的界面信息不包含发送者字段，因此聊天记录暂时无法拿到发送者信息。</p>
+          </details>
+        </div>
+      </div>
+    </section>
+
+    <section class="section cta-section">
+      <div class="container cta-panel reveal">
+        <div>
+          <p class="eyebrow">开始使用</p>
+          <h2>先去 GitHub 看代码，再决定要不要把重复操作交给它</h2>
+          <p>如果你的日常工作里经常要微信群发、重复发文件或同步改公告，wx4py 值得试一次。</p>
+        </div>
+        <div class="cta-actions">
+          <a class="button button-primary" href="https://github.com/claw-codes/wx4py" target="_blank" rel="noopener noreferrer">访问 GitHub 仓库</a>
+          <a class="button button-secondary" href="#quickstart">查看快速开始</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-grid">
+      <div>
+        <a class="brand footer-brand" href="#top">
+          <img class="brand-logo" src="./images/logo.png" alt="wx4py logo">
+          <span class="brand-text">wx4py</span>
+        </a>
+        <p>让微信 4.x 自动化变得简单，也让 OpenClaw（龙虾）更自然地接管微信重复操作。</p>
+      </div>
+      <div class="footer-links">
+        <a href="https://github.com/claw-codes/wx4py" target="_blank" rel="noopener noreferrer">GitHub 仓库</a>
+        <a href="https://github.com/claw-codes/wx4py/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">License</a>
+        <a href="./guide/QUICKSTART.md">快速说明</a>
+      </div>
+      <p class="copyright">© 2026 wx4py. Released under AGPL-3.0-or-later.</p>
+    </div>
+  </footer>
+
+  <script src="./script.js"></script>
+</body>
+</html>

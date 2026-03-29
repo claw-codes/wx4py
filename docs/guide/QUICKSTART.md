@@ -38,9 +38,9 @@ AI 会自动生成代码并执行！
 
 ## 📚 更多
 
-- 完整功能：[README.md](./README.md)
-- AI Skill：[wx4-skill/SKILL.md](./wx4-skill/SKILL.md)
-- 示例代码：[examples/](./examples/)
+- 完整功能：[README.md](../../README.md)
+- AI Skill：[wx4-skill/SKILL.md](../../wx4-skill/SKILL.md)
+- 示例代码：[examples/](../../examples/)
 
 ## 🔧 构建和发布
 

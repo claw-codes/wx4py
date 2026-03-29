@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://claw-codes.github.io/wx4py/sitemap.xml
