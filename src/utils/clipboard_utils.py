@@ -64,13 +64,13 @@ def set_files_to_clipboard(file_paths):
 
         return True
 
-    except Exception as e:
+    except Exception:
         return False
 
     finally:
         try:
             win32clipboard.CloseClipboard()
-        except:
+        except Exception:
             pass
 
 

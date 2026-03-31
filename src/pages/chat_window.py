@@ -2,10 +2,15 @@
 """Chat window page for WeChat"""
 import hashlib
 import random
+import re
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import date, timedelta
 from typing import Callable, Dict, List, Optional
+
+import win32api
+import win32con
 
 from .base import BasePage
 from ..core.exceptions import ControlNotFoundError, TargetNotFoundError
@@ -57,6 +62,13 @@ class SendRequest:
     target: str
     message: str
     target_type: str
+
+
+@dataclass(frozen=True)
+class ChatHistoryRange:
+    """Timestamp matching rules for chat history collection."""
+    in_range_prefixes: Optional[set[str]]
+    too_new_prefixes: set[str]
 
 
 class ChatWindow(BasePage):
@@ -227,6 +239,16 @@ class ChatWindow(BasePage):
         time.sleep(OPERATION_INTERVAL)
         return chat_input
 
+    def _paste_text_into_chat_input(self, text: str, log_error: str = "Failed to write message to clipboard") -> bool:
+        """Paste text into the currently focused chat input via clipboard."""
+        if not set_text_to_clipboard(text):
+            logger.error(log_error)
+            return False
+
+        self._send_ctrl_hotkey(VK_V)
+        time.sleep(OPERATION_INTERVAL)
+        return True
+
     def _run_send_phase(
         self,
         request: SendRequest,
@@ -234,7 +256,7 @@ class ChatWindow(BasePage):
         phase: str,
         action: Callable[[], bool],
         error_message: str,
-    ) -> None:
+    ) -> bool:
         """Execute one send phase and write audit logs."""
         started_at = time.time()
         try:
@@ -252,6 +274,7 @@ class ChatWindow(BasePage):
             raise
 
         self._log_send_phase(request.target, attempt, phase, True, started_at)
+        return True
 
     def _send_once(self, request: SendRequest, attempt: int) -> bool:
         """Run one full send attempt."""
@@ -262,7 +285,9 @@ class ChatWindow(BasePage):
                 request,
                 attempt,
                 "open",
-                lambda: self.open_chat(request.target, request.target_type),
+                lambda: self._open_chat_with_status(
+                    request.target, request.target_type
+                ),
                 "failed to open chat",
             )
             self._run_send_phase(
@@ -299,6 +324,26 @@ class ChatWindow(BasePage):
                 self._sleep_before_send_retry()
 
         return False
+
+    def _send_with_reconnect_fallback(self, request: SendRequest) -> bool:
+        """Run normal send retries, then rebuild the UIA session and retry once more."""
+        initial_attempts = range(1, SEND_RETRY_COUNT + 1)
+        if self._send_with_retry_range(request, initial_attempts):
+            return True
+
+        if SEND_RECONNECT_RETRY_COUNT <= 0:
+            return False
+
+        self._rebuild_uia_session()
+        reconnect_attempts = range(
+            SEND_RETRY_COUNT + 1,
+            SEND_RETRY_COUNT + SEND_RECONNECT_RETRY_COUNT + 1,
+        )
+        return self._send_with_retry_range(request, reconnect_attempts)
+
+    def _open_chat_with_status(self, target: str, target_type: str = 'contact') -> bool:
+        """Open chat and preserve TargetNotFoundError for send workflow control."""
+        return self.open_chat(target, target_type, raise_on_target_not_found=True)
 
     def _get_search_edit(self, retries: int = SEARCH_RETRY_COUNT):
         """Get main search box control (not the one in group detail panel)."""
@@ -528,20 +573,34 @@ class ChatWindow(BasePage):
         logger.info(f"Chat opened: {target}")
         return True
 
-    def open_chat(self, target: str, target_type: str = 'contact') -> bool:
+    def open_chat(
+        self,
+        target: str,
+        target_type: str = 'contact',
+        raise_on_target_not_found: bool = False,
+    ) -> bool:
         """
         Search and open chat with target.
 
         Args:
             target: Contact or group name
             target_type: 'contact' or 'group'
+            raise_on_target_not_found: If True, preserve TargetNotFoundError for
+                callers that need to distinguish a missing target from transient
+                UI failures.
 
         Returns:
             bool: True if successful
         """
         for attempt in range(1, SEARCH_RETRY_COUNT + 1):
-            if self._open_chat_once(target, target_type):
-                return True
+            try:
+                if self._open_chat_once(target, target_type):
+                    return True
+            except TargetNotFoundError:
+                if raise_on_target_not_found:
+                    raise
+                logger.error(f"Target chat not found: '{target}'")
+                return False
 
             self._clear_search()
             self._window.activate()
@@ -573,12 +632,9 @@ class ChatWindow(BasePage):
         if not chat_input:
             return False
 
-        if not set_text_to_clipboard(message):
-            logger.error("Failed to write message to clipboard")
+        if not self._paste_text_into_chat_input(message):
             return False
 
-        self._send_ctrl_hotkey(VK_V)
-        time.sleep(OPERATION_INTERVAL)
         chat_input.SendKeys('{Enter}')
         time.sleep(OPERATION_INTERVAL)
 
@@ -605,28 +661,11 @@ class ChatWindow(BasePage):
             )
             return True
 
-        initial_attempts = range(1, SEND_RETRY_COUNT + 1)
         try:
-            if self._send_with_retry_range(request, initial_attempts):
+            if self._send_with_reconnect_fallback(request):
                 return True
         except TargetNotFoundError:
             logger.error(f"Target chat not found: '{request.target}'")
-            return False
-
-        if SEND_RECONNECT_RETRY_COUNT <= 0:
-            logger.error(f"Failed to send message to '{request.target}' after retries")
-            return False
-
-        self._rebuild_uia_session()
-        reconnect_attempts = range(
-            SEND_RETRY_COUNT + 1,
-            SEND_RETRY_COUNT + SEND_RECONNECT_RETRY_COUNT + 1,
-        )
-        try:
-            if self._send_with_retry_range(request, reconnect_attempts):
-                return True
-        except TargetNotFoundError:
-            logger.error(f"Target chat not found after reconnect: '{request.target}'")
             return False
 
         logger.error(f"Failed to send message to '{request.target}' after retries")
@@ -683,10 +722,7 @@ class ChatWindow(BasePage):
         if not chat_input:
             return False
 
-        try:
-            set_files_to_clipboard(file_path)
-        except ValueError as e:
-            logger.error(str(e))
+        if not self._set_files_to_clipboard(file_path):
             return False
 
         time.sleep(0.2)
@@ -695,15 +731,33 @@ class ChatWindow(BasePage):
         time.sleep(0.5)
 
         # Add message if provided
-        if message:
-            chat_input.SendKeys(message)
-            time.sleep(0.3)
+        normalized_message = self._normalize_message(message) if message is not None else ""
+        if normalized_message:
+            if not self._paste_text_into_chat_input(
+                normalized_message,
+                log_error="Failed to write file message to clipboard",
+            ):
+                return False
 
         # Press Enter to send
         chat_input.SendKeys('{Enter}')
         time.sleep(0.5)
 
         logger.info("File sent")
+        return True
+
+    def _set_files_to_clipboard(self, file_path) -> bool:
+        """Set file paths to clipboard and surface failures consistently."""
+        try:
+            copied = set_files_to_clipboard(file_path)
+        except ValueError as exc:
+            logger.error(str(exc))
+            return False
+
+        if not copied:
+            logger.error("Failed to copy file paths to clipboard")
+            return False
+
         return True
 
     def send_file_to(self, target: str, file_path, target_type: str = 'contact', message: str = None) -> bool:
@@ -722,6 +776,131 @@ class ChatWindow(BasePage):
         if not self.open_chat(target, target_type):
             return False
         return self.send_file(file_path, message)
+
+    def _get_chat_history_range(self, since: str) -> ChatHistoryRange:
+        """Resolve timestamp prefix rules for a chat history query."""
+        range_in = {
+            'today': {'今天'},
+            'yesterday': {'昨天'},
+            'week': {'今天', '昨天', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六', '星期日'},
+            'all': None,
+        }
+        range_too_new = {
+            'today': set(),
+            'yesterday': {'今天'},
+            'week': set(),
+            'all': set(),
+        }
+        return ChatHistoryRange(
+            in_range_prefixes=range_in.get(since, range_in['today']),
+            too_new_prefixes=range_too_new.get(since, set()),
+        )
+
+    def _normalize_history_timestamp(self, ts: str, today: date, yesterday: date) -> str:
+        """Normalize long-form timestamps to the short prefixes used by range filters."""
+        if re.match(r'^\d{1,2}:\d{2}', ts):
+            return '今天'
+
+        match = re.match(r'^(\d{1,2})月(\d{1,2})日', ts)
+        if not match:
+            return ts
+
+        month, day = int(match.group(1)), int(match.group(2))
+        try:
+            normalized_date = date(today.year, month, day)
+        except ValueError:
+            return ts
+
+        if normalized_date == today:
+            return '今天'
+        if normalized_date == yesterday:
+            return '昨天'
+
+        weekday_map = ['星期一', '星期二', '星期三', '星期四', '星期五', '星期六', '星期日']
+        return weekday_map[normalized_date.weekday()]
+
+    def _get_history_timestamp_state(
+        self,
+        ts: str,
+        history_range: ChatHistoryRange,
+        today: date,
+        yesterday: date,
+    ) -> str:
+        """Return whether a timestamp is in range, newer than range, or too old."""
+        if not ts or history_range.in_range_prefixes is None:
+            return 'in_range'
+
+        effective = self._normalize_history_timestamp(ts, today, yesterday)
+        if any(effective.startswith(prefix) for prefix in history_range.too_new_prefixes):
+            return 'too_new'
+        if any(effective.startswith(prefix) for prefix in history_range.in_range_prefixes):
+            return 'in_range'
+        return 'too_old'
+
+    def _get_chat_message_list(self):
+        """Get the chat message list control if available."""
+        msg_list = self.root.ListControl(AutomationId='chat_message_list')
+        if not msg_list.Exists(maxSearchSeconds=2):
+            logger.error("chat_message_list not found")
+            return None
+        return msg_list
+
+    def _get_message_list_center(self, msg_list) -> tuple[int, int]:
+        """Return the center point of the message list for wheel scrolling."""
+        rect = msg_list.BoundingRectangle
+        return (rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2
+
+    def _read_visible_chat_items(self, msg_list) -> list[tuple[str, str]]:
+        """Read visible timestamp and message items from the current chat view."""
+        time_cls = 'mmui::ChatItemView'
+        msg_types = {'mmui::ChatTextItemView', 'mmui::ChatBubbleItemView'}
+        time_re = re.compile(r'^(今天|昨天|星期[一二三四五六日]|\d{1,2}月\d{1,2}日|\d{1,2}/\d{1,2}|\d{4}年|\d{1,2}:\d{2})')
+
+        items = []
+        try:
+            for child in msg_list.GetChildren():
+                cls = child.ClassName or ""
+                name = child.Name or ""
+                if cls == time_cls:
+                    kind = 'time' if time_re.match(name) else 'system'
+                    items.append((kind, name))
+                elif cls in msg_types:
+                    kind = 'text' if 'Text' in cls else 'link'
+                    items.append((kind, name))
+        except Exception:
+            return []
+        return items
+
+    def _scroll_message_list(self, cx: int, cy: int, delta: int, steps: int, step_delay: float, settle_time: float) -> None:
+        """Scroll the message list with consistent cursor placement and timing."""
+        win32api.SetCursorPos((cx, cy))
+        for _ in range(steps):
+            win32api.mouse_event(win32con.MOUSEEVENTF_WHEEL, 0, 0, delta, 0)
+            time.sleep(step_delay)
+        time.sleep(settle_time)
+
+    def _scroll_message_list_to_bottom(self, msg_list, cx: int, cy: int) -> None:
+        """Scroll to the newest visible messages before collecting history."""
+        logger.debug("Scrolling to bottom...")
+        previous_bottom = None
+        stuck_count = 0
+        while stuck_count < 3:
+            try:
+                children = list(msg_list.GetChildren())
+                current_bottom = (children[-1].Name or '') if children else ''
+            except Exception:
+                current_bottom = ''
+
+            if current_bottom == previous_bottom:
+                stuck_count += 1
+            else:
+                stuck_count = 0
+
+            previous_bottom = current_bottom
+            self._scroll_message_list(cx, cy, delta=-360, steps=5, step_delay=0.05, settle_time=0.4)
+
+        logger.debug("Reached bottom, starting upward collection.")
+        time.sleep(0.3)
 
     def get_chat_history(self, target: str, target_type: str = 'contact',
                          since: str = 'today', max_count: int = 500) -> list:
@@ -754,99 +933,20 @@ class ChatWindow(BasePage):
         Returns:
             list[dict]
         """
-        import re
-        import win32api
-        import win32con
-        from datetime import date, timedelta
-
-        _TIME_CLS  = 'mmui::ChatItemView'
-        _MSG_TYPES = {'mmui::ChatTextItemView', 'mmui::ChatBubbleItemView'}
-        # Matches both short and long timestamp prefixes
-        _TIME_RE   = re.compile(
-            r'^(今天|昨天|星期[一二三四五六日]|\d{1,2}月\d{1,2}日|\d{1,2}/\d{1,2}|\d{4}年|\d{1,2}:\d{2})'
-        )
-
-        # Each since value defines:
-        #   in_range  prefixes → collect messages with these timestamps
-        #   too_old   prefixes → stop scrolling when seen (older than target)
-        #   too_new   prefixes → skip but keep scrolling (newer than target)
-        #
-        # Recency order: 今天 > 昨天 > 星期X > MM/DD date > YYYY年 date
-        _RANGE_IN = {
-            'today':     {'今天'},
-            'yesterday': {'昨天'},
-            'week':      {'今天', '昨天', '星期一', '星期二', '星期三',
-                          '星期四', '星期五', '星期六', '星期日'},
-            'all':       None,
-        }
-        _RANGE_TOO_NEW = {
-            'today':     set(),
-            'yesterday': {'今天'},
-            'week':      set(),
-            'all':       set(),
-        }
-
-        in_range_prefixes  = _RANGE_IN.get(since, _RANGE_IN['today'])
-        too_new_prefixes   = _RANGE_TOO_NEW.get(since, set())
-
-        _BARE_TIME_RE = re.compile(r'^\d{1,2}:\d{2}')
-        _MDAY_RE      = re.compile(r'^(\d{1,2})月(\d{1,2})日')
-
-        _today     = date.today()
-        _yesterday = _today - timedelta(days=1)
-
-        _WEEKDAY_MAP = ['星期一', '星期二', '星期三', '星期四', '星期五', '星期六', '星期日']
-
-        def _normalize_ts(ts: str) -> str:
-            """
-            Normalize long-form 'M月D日 星期X HH:MM' to its short-form prefix
-            so range logic can treat both formats identically.
-            """
-            # Bare HH:MM → 今天
-            if _BARE_TIME_RE.match(ts):
-                return '今天'
-            # Long form: e.g. "3月27日 星期五 11:59"
-            m = _MDAY_RE.match(ts)
-            if m:
-                month, day = int(m.group(1)), int(m.group(2))
-                try:
-                    d = date(_today.year, month, day)
-                except ValueError:
-                    return ts
-                if d == _today:
-                    return '今天'
-                if d == _yesterday:
-                    return '昨天'
-                # Within this week: return 星期X
-                return _WEEKDAY_MAP[d.weekday()]
-            return ts
-
-        def _ts_state(ts: str) -> str:
-            """Return 'in_range', 'too_new', or 'too_old'."""
-            if not ts:
-                return 'in_range'
-            if in_range_prefixes is None:
-                return 'in_range'
-            effective = _normalize_ts(ts)
-            if any(effective.startswith(p) for p in too_new_prefixes):
-                return 'too_new'
-            if any(effective.startswith(p) for p in in_range_prefixes):
-                return 'in_range'
-            return 'too_old'
+        history_range = self._get_chat_history_range(since)
+        today = date.today()
+        yesterday = today - timedelta(days=1)
 
         if not self.open_chat(target, target_type):
             logger.error(f"Failed to open chat: {target}")
             return []
         time.sleep(1)
 
-        msg_list = self.root.ListControl(AutomationId='chat_message_list')
-        if not msg_list.Exists(maxSearchSeconds=2):
-            logger.error("chat_message_list not found")
+        msg_list = self._get_chat_message_list()
+        if not msg_list:
             return []
 
-        rect = msg_list.BoundingRectangle
-        cx   = (rect.left + rect.right) // 2
-        cy   = (rect.top  + rect.bottom) // 2
+        cx, cy = self._get_message_list_center(msg_list)
 
         # collected newest-first while scrolling; reversed at the end
         collected:   list = []
@@ -855,52 +955,16 @@ class ChatWindow(BasePage):
         prev_top:    str  = None    # content of first visible item, scroll-position indicator
         stuck_count: int  = 0
 
-        def _read_visible():
-            items = []
-            try:
-                for child in msg_list.GetChildren():
-                    cls  = child.ClassName or ""
-                    name = child.Name or ""
-                    if cls == _TIME_CLS:
-                        kind = 'time' if _TIME_RE.match(name) else 'system'
-                        items.append((kind, name))
-                    elif cls in _MSG_TYPES:
-                        kind = 'text' if 'Text' in cls else 'link'
-                        items.append((kind, name))
-            except Exception:
-                pass
-            return items
-
         # Focus the list without clicking (click would trigger image/link items)
         msg_list.SetFocus()
         time.sleep(0.3)
 
         # Scroll to bottom first so we always start from the newest messages
-        logger.debug("Scrolling to bottom...")
-        _bottom_prev = None
-        _bottom_stuck = 0
-        while _bottom_stuck < 3:
-            try:
-                children = list(msg_list.GetChildren())
-                _bottom_cur = (children[-1].Name or '') if children else ''
-            except Exception:
-                _bottom_cur = ''
-            if _bottom_cur == _bottom_prev:
-                _bottom_stuck += 1
-            else:
-                _bottom_stuck = 0
-            _bottom_prev = _bottom_cur
-            win32api.SetCursorPos((cx, cy))
-            for _ in range(5):
-                win32api.mouse_event(win32con.MOUSEEVENTF_WHEEL, 0, 0, -360, 0)
-                time.sleep(0.05)
-            time.sleep(0.4)
-        logger.debug("Reached bottom, starting upward collection.")
-        time.sleep(0.3)
+        self._scroll_message_list_to_bottom(msg_list, cx, cy)
 
         stop_reason = ''
         while True:
-            batch    = _read_visible()
+            batch = self._read_visible_chat_items(msg_list)
             stop_now = False
 
             # Detect scroll progress by the first visible item changing
@@ -915,13 +979,23 @@ class ChatWindow(BasePage):
             for kind, name in batch:
                 if kind == 'time':
                     current_ts = name
-                    state = _ts_state(current_ts)
+                    state = self._get_history_timestamp_state(
+                        current_ts,
+                        history_range,
+                        today,
+                        yesterday,
+                    )
                     if state == 'too_old':
                         stop_now = True
                         break
                     continue   # too_new or in_range: update ts, keep going
 
-                state = _ts_state(current_ts)
+                state = self._get_history_timestamp_state(
+                    current_ts,
+                    history_range,
+                    today,
+                    yesterday,
+                )
                 if state == 'too_old':
                     stop_now = True
                     break
@@ -955,11 +1029,7 @@ class ChatWindow(BasePage):
                 stop_reason = "reached top (first visible item unchanged after 5 scrolls)"
                 break
 
-            win32api.SetCursorPos((cx, cy))
-            for _ in range(5):
-                win32api.mouse_event(win32con.MOUSEEVENTF_WHEEL, 0, 0, 360, 0)
-                time.sleep(0.1)
-            time.sleep(0.8)
+            self._scroll_message_list(cx, cy, delta=360, steps=5, step_delay=0.1, settle_time=0.8)
 
         logger.info(
             f"get_chat_history: {len(collected)} items from '{target}' "

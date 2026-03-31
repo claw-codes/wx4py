@@ -32,6 +32,113 @@ class GroupManager(BasePage):
     def __init__(self, window):
         super().__init__(window)
 
+    def _press_key(self, key_code: int, hold_time: float = 0.1) -> None:
+        """Press and release a virtual key once."""
+        win32api.keybd_event(key_code, 0, 0, 0)
+        time.sleep(hold_time)
+        win32api.keybd_event(key_code, 0, win32con.KEYEVENTF_KEYUP, 0)
+
+    def _send_ctrl_combo(self, key_code: int, settle_time: float = 0.3) -> None:
+        """Send Ctrl+<key> and wait briefly for UI updates."""
+        win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
+        time.sleep(0.05)
+        win32api.keybd_event(key_code, 0, 0, 0)
+        time.sleep(0.05)
+        win32api.keybd_event(key_code, 0, win32con.KEYEVENTF_KEYUP, 0)
+        time.sleep(0.05)
+        win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
+        time.sleep(settle_time)
+
+    def _walk_controls(self, root, max_depth: int = 20) -> list:
+        """Collect a control tree defensively."""
+        results = []
+
+        def _visit(ctrl, depth: int) -> None:
+            if depth > max_depth:
+                return
+            results.append(ctrl)
+            try:
+                for child in ctrl.GetChildren():
+                    _visit(child, depth + 1)
+            except Exception:
+                return
+
+        _visit(root, 0)
+        return results
+
+    def _focus_control_center(self, ctrl) -> None:
+        """Focus a popup by clicking its center point."""
+        rect = ctrl.BoundingRectangle
+        if not rect:
+            return
+        center_x = (rect.left + rect.right) // 2
+        center_y = (rect.top + rect.bottom) // 2
+        self._click_at_position(center_x, center_y)
+        time.sleep(0.3)
+
+    def _open_group_chat(self, group_name: str) -> bool:
+        """Open a group chat with consistent logging."""
+        from .chat_window import ChatWindow
+
+        chat_window = ChatWindow(self._window)
+        if not chat_window.open_chat(group_name, target_type='group'):
+            logger.error(f"Failed to open group: {group_name}")
+            return False
+        time.sleep(1)
+        return True
+
+    def _get_group_detail_view(self, timeout: float = 2):
+        """Get the group detail panel if present."""
+        info_view = self.root.GroupControl(ClassName='mmui::ChatRoomMemberInfoView')
+        if not info_view.Exists(maxSearchSeconds=timeout):
+            logger.error("ChatRoomMemberInfoView not found")
+            return None
+        return info_view
+
+    def _open_and_focus_group_detail(self, group_name: str):
+        """Open a group chat, show its detail panel, and focus the panel."""
+        if not self._open_group_chat(group_name):
+            return None
+        if not self._open_group_detail():
+            return None
+
+        info_view = self._get_group_detail_view()
+        if not info_view:
+            return None
+
+        info_view.SetFocus()
+        time.sleep(0.3)
+        return info_view
+
+    def _find_button_with_deadline(self, button_name: str, timeout: float = 3.0):
+        """Poll for a button in the main window until timeout."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            button = self.root.ButtonControl(Name=button_name)
+            if button.Exists(maxSearchSeconds=0.2):
+                return button
+            time.sleep(0.2)
+        return None
+
+    def _get_member_list(self):
+        """Get the group member list control if present."""
+        member_list = self.root.ListControl(AutomationId='chat_member_list')
+        if not member_list.Exists(maxSearchSeconds=2):
+            logger.error("chat_member_list not found")
+            return None
+        return member_list
+
+    def _scroll_list(self, ctrl, delta: int, steps: int, step_delay: float, settle_time: float) -> None:
+        """Scroll a list-like control by mouse wheel."""
+        rect = ctrl.BoundingRectangle
+        cx = (rect.left + rect.right) // 2
+        cy = (rect.top + rect.bottom) // 2
+        win32api.SetCursorPos((cx, cy))
+        for _ in range(steps):
+            win32api.mouse_event(win32con.MOUSEEVENTF_WHEEL, 0, 0, delta, 0)
+            time.sleep(step_delay)
+        time.sleep(settle_time)
+
     def _find_announcement_window(self) -> Optional[dict]:
         """Find announcement popup window"""
         windows = []
@@ -44,9 +151,23 @@ class GroupManager(BasePage):
         win32gui.EnumWindows(enum_callback, windows)
         return windows[0] if windows else None
 
+    def _get_announcement_popup(self):
+        """Get the announcement popup control and hwnd after opening the panel."""
+        popup_info = self._find_announcement_window()
+        if not popup_info:
+            logger.error("Announcement popup not found")
+            return None, None
+
+        hwnd = popup_info['hwnd']
+        popup = control_from_handle(hwnd)
+        if not popup:
+            logger.error("Could not get announcement popup control")
+            return None, None
+        return popup, hwnd
+
     def _click_at_position(self, x: int, y: int):
         """Click at screen coordinates"""
-        print(f"[CLICK] Position: ({x}, {y})")
+        logger.debug(f"Click at screen position ({x}, {y})")
         win32api.SetCursorPos((x, y))
         time.sleep(0.2)
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
@@ -67,58 +188,30 @@ class GroupManager(BasePage):
         logger.info(f"Looking for '{button_name}' button via Tab navigation...")
 
         # Focus popup
-        popup_rect = popup.BoundingRectangle
-        if popup_rect:
-            center_x = (popup_rect.left + popup_rect.right) // 2
-            center_y = (popup_rect.top + popup_rect.bottom) // 2
-            self._click_at_position(center_x, center_y)
-            time.sleep(0.5)
+        self._focus_control_center(popup)
+        time.sleep(0.2)
 
         # Tab through controls to find the button
         for tab_count in range(20):
-            print(f"[TAB] Navigation #{tab_count + 1}...")
-
-            # Send Tab key
-            win32api.keybd_event(win32con.VK_TAB, 0, 0, 0)
-            time.sleep(0.15)
-            win32api.keybd_event(win32con.VK_TAB, 0, win32con.KEYEVENTF_KEYUP, 0)
+            self._press_key(win32con.VK_TAB, hold_time=0.15)
             time.sleep(0.3)
 
             # Check if target button is now visible
-            all_controls = []
-
-            def find_controls(ctrl, results, depth=0):
-                if depth > 20:
-                    return
-                results.append(ctrl)
-                try:
-                    for child in ctrl.GetChildren():
-                        find_controls(child, results, depth + 1)
-                except:
-                    pass
-
-            find_controls(popup, all_controls)
+            all_controls = self._walk_controls(popup)
 
             for ctrl in all_controls:
                 if ctrl.Name == button_name:
-                    print(f"[FOUND] '{button_name}' at Tab #{tab_count + 1}")
                     logger.info(f"Found '{button_name}' button at Tab #{tab_count + 1}")
 
                     # Try both Space and Enter to activate it
                     for key_name, key_code in [("Space", win32con.VK_SPACE), ("Return", win32con.VK_RETURN)]:
-                        print(f"[ACTION] Pressing {key_name} to activate '{button_name}'...")
                         logger.info(f"Pressing {key_name} to activate '{button_name}'...")
-
-                        win32api.keybd_event(key_code, 0, 0, 0)
-                        time.sleep(0.1)
-                        win32api.keybd_event(key_code, 0, win32con.KEYEVENTF_KEYUP, 0)
+                        self._press_key(key_code)
                         time.sleep(0.5)
 
-                    print(f"[SUCCESS] '{button_name}' activated!")
                     time.sleep(1)
                     return True
 
-        print(f"[FAIL] Could not find '{button_name}' button after 20 tabs")
         logger.error(f"Could not find '{button_name}' button")
         return False
 
@@ -136,64 +229,33 @@ class GroupManager(BasePage):
         Returns:
             list[str]: Member display names (昵称 or 备注名)
         """
-        from .chat_window import ChatWindow
-
         logger.info(f"Getting members for group: {group_name}")
 
-        # Step 1: Open group
-        chat_window = ChatWindow(self._window)
-        if not chat_window.open_chat(group_name, target_type='group'):
-            logger.error(f"Failed to open group: {group_name}")
-            return []
-        time.sleep(1)
-
-        # Step 2: Open group detail panel
-        if not self._open_group_detail():
+        # Step 1: Open group detail panel and focus it
+        info_view = self._open_and_focus_group_detail(group_name)
+        if not info_view:
             return []
 
-        # Step 3: Find detail panel and try to expand via 查看更多
-        info_view = self.root.GroupControl(ClassName='mmui::ChatRoomMemberInfoView')
-        if not info_view.Exists(maxSearchSeconds=2):
-            logger.error("ChatRoomMemberInfoView not found")
-            return []
-
-        info_view.SetFocus()
-        time.sleep(0.3)
-
-        # Tab to 查看更多 (virtualized, FindFirst won't work)
+        # Step 2: Tab to 查看更多 (virtualized, FindFirst won't work)
         for i in range(10):
-            win32api.keybd_event(win32con.VK_TAB, 0, 0, 0)
-            time.sleep(0.05)
-            win32api.keybd_event(win32con.VK_TAB, 0, win32con.KEYEVENTF_KEYUP, 0)
+            self._press_key(win32con.VK_TAB, hold_time=0.05)
             time.sleep(0.3)
             focused = GetFocusedControl()
             if focused and '查看更多' in (focused.Name or ''):
                 logger.info(f"Found 查看更多 at Tab #{i + 1}, triggering...")
-                win32api.keybd_event(win32con.VK_RETURN, 0, 0, 0)
-                time.sleep(0.1)
-                win32api.keybd_event(win32con.VK_RETURN, 0, win32con.KEYEVENTF_KEYUP, 0)
+                self._press_key(win32con.VK_RETURN)
                 time.sleep(1)
                 break
         else:
             logger.info("查看更多 not found, collecting visible members only")
 
-        # Step 4: Find member list by AutomationId (works after expand too)
-        member_list = self.root.ListControl(AutomationId='chat_member_list')
-        if not member_list.Exists(maxSearchSeconds=2):
-            logger.error("chat_member_list not found")
+        # Step 3: Find member list by AutomationId (works after expand too)
+        member_list = self._get_member_list()
+        if not member_list:
             return []
 
-        # Step 5: Scroll and collect all members
-        rect = member_list.BoundingRectangle
-        cx = (rect.left + rect.right) // 2
-        cy = (rect.top + rect.bottom) // 2
-
-        # Scroll to top first
-        win32api.SetCursorPos((cx, cy))
-        for _ in range(10):
-            win32api.mouse_event(win32con.MOUSEEVENTF_WHEEL, 0, 0, 120 * 3, 0)
-            time.sleep(0.1)
-        time.sleep(0.5)
+        # Step 4: Scroll and collect all members
+        self._scroll_list(member_list, delta=120 * 3, steps=10, step_delay=0.1, settle_time=0.5)
 
         all_members = set()
         no_new_count = 0
@@ -216,9 +278,7 @@ class GroupManager(BasePage):
                 no_new_count += 1
 
             # Scroll one row at a time and wait for Qt to render
-            win32api.SetCursorPos((cx, cy))
-            win32api.mouse_event(win32con.MOUSEEVENTF_WHEEL, 0, 0, -120, 0)
-            time.sleep(0.6)
+            self._scroll_list(member_list, delta=-120, steps=1, step_delay=0.0, settle_time=0.6)
 
         members = sorted(all_members)
         logger.info(f"Collected {len(members)} members from group: {group_name}")
@@ -237,9 +297,8 @@ class GroupManager(BasePage):
 
     def _click_announcement_button(self) -> bool:
         """Click announcement button in group detail panel using Tab navigation"""
-        info_view = self.root.GroupControl(ClassName='mmui::ChatRoomMemberInfoView')
-        if not info_view.Exists():
-            logger.error("ChatRoomMemberInfoView not found")
+        info_view = self._get_group_detail_view(timeout=2)
+        if not info_view:
             return False
 
         # Focus the panel without clicking (avoids triggering child controls)
@@ -250,9 +309,7 @@ class GroupManager(BasePage):
         logger.info("Looking for '群公告' button via Tab navigation...")
 
         for tab_count in range(30):
-            win32api.keybd_event(win32con.VK_TAB, 0, 0, 0)
-            time.sleep(0.05)
-            win32api.keybd_event(win32con.VK_TAB, 0, win32con.KEYEVENTF_KEYUP, 0)
+            self._press_key(win32con.VK_TAB, hold_time=0.05)
             time.sleep(0.3)
 
             focused = GetFocusedControl()
@@ -262,9 +319,7 @@ class GroupManager(BasePage):
             name = focused.Name or ""
             if "群公告" in name:
                 logger.info(f"Found '群公告' at Tab #{tab_count + 1}")
-                win32api.keybd_event(win32con.VK_RETURN, 0, 0, 0)
-                time.sleep(0.1)
-                win32api.keybd_event(win32con.VK_RETURN, 0, win32con.KEYEVENTF_KEYUP, 0)
+                self._press_key(win32con.VK_RETURN)
                 time.sleep(2)
                 return True
 
@@ -303,16 +358,7 @@ class GroupManager(BasePage):
         edit.Click()
         time.sleep(0.5)
 
-        # Select all first (Ctrl+A)
-        VK_A = 0x41
-        win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
-        time.sleep(0.05)
-        win32api.keybd_event(VK_A, 0, 0, 0)
-        time.sleep(0.05)
-        win32api.keybd_event(VK_A, 0, win32con.KEYEVENTF_KEYUP, 0)
-        time.sleep(0.05)
-        win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
-        time.sleep(0.3)
+        self._send_ctrl_combo(0x41, settle_time=0.3)
 
         # Copy content to clipboard (unless pasting from existing clipboard)
         if not paste_from_clipboard and content:
@@ -320,16 +366,7 @@ class GroupManager(BasePage):
             pyperclip.copy(content)
             time.sleep(0.2)
 
-        # Paste with Ctrl+V
-        VK_V = 0x56
-        win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
-        time.sleep(0.05)
-        win32api.keybd_event(VK_V, 0, 0, 0)
-        time.sleep(0.05)
-        win32api.keybd_event(VK_V, 0, win32con.KEYEVENTF_KEYUP, 0)
-        time.sleep(0.05)
-        win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
-        time.sleep(0.5)
+        self._send_ctrl_combo(0x56, settle_time=0.5)
 
         return True
 
@@ -347,15 +384,7 @@ class GroupManager(BasePage):
     def _click_publish_button(self, popup) -> bool:
         """Click '发布' button in confirm dialog"""
         # Find '取消' button first
-        all_controls = []
-        def find_controls(ctrl, results, depth=0):
-            if depth > 15:
-                return
-            results.append(ctrl)
-            for child in ctrl.GetChildren():
-                find_controls(child, results, depth + 1)
-
-        find_controls(popup, all_controls)
+        all_controls = self._walk_controls(popup, max_depth=15)
 
         cancel_btn = None
         for ctrl in all_controls:
@@ -382,6 +411,18 @@ class GroupManager(BasePage):
         time.sleep(2)
         return True
 
+    def _has_existing_announcement(self, popup, max_tabs: int = 15) -> bool:
+        """Detect whether the popup exposes an existing announcement edit action."""
+        self._focus_control_center(popup)
+
+        for _ in range(max_tabs):
+            self._press_key(win32con.VK_TAB)
+            time.sleep(0.2)
+            for ctrl in self._walk_controls(popup):
+                if ctrl.Name == '编辑群公告':
+                    return True
+        return False
+
     def modify_announcement_simple(self, group_name: str, announcement: str = None, paste_from_clipboard: bool = False) -> bool:
         """
         Simple announcement modification.
@@ -392,99 +433,42 @@ class GroupManager(BasePage):
         Usage:
             wx.group_manager.modify_announcement_simple("群名", "新公告内容")
         """
-        from .chat_window import ChatWindow
-
         logger.info(f"Modifying announcement for group: {group_name}")
 
-        # Step 1: Open group chat
-        chat_window = ChatWindow(self._window)
-        if not chat_window.open_chat(group_name, target_type='group'):
-            logger.error(f"Failed to open group: {group_name}")
+        # Step 1: Open and focus the group detail panel
+        if not self._open_and_focus_group_detail(group_name):
             return False
 
-        time.sleep(1)
-
-        # Step 2: Open group detail panel
-        if not self._open_group_detail():
-            return False
-
-        # Step 3: Click announcement button
+        # Step 2: Click announcement button
         if not self._click_announcement_button():
             return False
 
-        # Step 4: Find announcement popup
-        popup_info = self._find_announcement_window()
-        if not popup_info:
-            logger.error("Announcement popup not found")
+        # Step 3: Find announcement popup
+        popup, hwnd = self._get_announcement_popup()
+        if not popup:
             return False
 
-        hwnd = popup_info['hwnd']
-        popup = control_from_handle(hwnd)
+        # Step 4: Check if there's existing content by Tab navigation
+        has_existing_content = self._has_existing_announcement(popup)
 
-        # Step 5: Check if there's existing content by Tab navigation
-        # Tab through to find "编辑群公告" button
-        print("[DEBUG] Checking for existing content via Tab navigation...")
-        has_existing_content = False
-
-        # Focus popup first
-        popup_rect = popup.BoundingRectangle
-        if popup_rect:
-            center_x = (popup_rect.left + popup_rect.right) // 2
-            center_y = (popup_rect.top + popup_rect.bottom) // 2
-            self._click_at_position(center_x, center_y)
-            time.sleep(0.3)
-
-        # Tab through to find edit button
-        for tab_count in range(15):
-            win32api.keybd_event(win32con.VK_TAB, 0, 0, 0)
-            time.sleep(0.1)
-            win32api.keybd_event(win32con.VK_TAB, 0, win32con.KEYEVENTF_KEYUP, 0)
-            time.sleep(0.2)
-
-            # Check if edit button exists now
-            all_controls = []
-            def find_controls(ctrl, results, depth=0):
-                if depth > 20:
-                    return
-                results.append(ctrl)
-                try:
-                    for child in ctrl.GetChildren():
-                        find_controls(child, results, depth + 1)
-                except:
-                    pass
-
-            find_controls(popup, all_controls)
-
-            for ctrl in all_controls:
-                if ctrl.Name == '编辑群公告':
-                    has_existing_content = True
-                    print(f"[DEBUG] Found edit button at Tab #{tab_count + 1}, has_existing_content=True")
-                    break
-
-            if has_existing_content:
-                break
-
-        print(f"[DEBUG] Final: has_existing_content={has_existing_content}")
         logger.info(f"Has existing content: {has_existing_content}")
 
-        # Step 6: If there's existing content, trigger edit button first
+        # Step 5: If there's existing content, trigger edit button first
         if has_existing_content:
             logger.info("Triggering edit button for existing announcement...")
             # Edit button is already visible from Tab navigation, just press Enter to activate
-            win32api.keybd_event(win32con.VK_RETURN, 0, 0, 0)
-            time.sleep(0.1)
-            win32api.keybd_event(win32con.VK_RETURN, 0, win32con.KEYEVENTF_KEYUP, 0)
+            self._press_key(win32con.VK_RETURN)
             time.sleep(1)
 
-        # Step 7: Input announcement content
+        # Step 6: Input announcement content
         if not self._input_announcement_content(popup, announcement, paste_from_clipboard):
             return False
 
-        # Step 8: Click "完成" button
+        # Step 7: Click "完成" button
         if not self._click_complete_button(hwnd):
             return False
 
-        # Step 9: Click "发布" button in confirm dialog
+        # Step 8: Click "发布" button in confirm dialog
         if not self._click_publish_button(popup):
             return False
 
@@ -502,97 +486,12 @@ class GroupManager(BasePage):
         Returns:
             bool: True if successful
         """
-        from .chat_window import ChatWindow
+        return self.modify_announcement_simple(
+            group_name=group_name,
+            announcement=announcement,
+            paste_from_clipboard=False,
+        )
 
-        logger.info(f"Modifying announcement for group: {group_name}")
-
-        # Step 1: Open group chat
-        chat_window = ChatWindow(self._window)
-        if not chat_window.open_chat(group_name, target_type='group'):
-            logger.error(f"Failed to open group: {group_name}")
-            return False
-
-        time.sleep(1)
-
-        # Step 2: Open group detail panel
-        if not self._open_group_detail():
-            return False
-
-        # Step 3: Click announcement button
-        if not self._click_announcement_button():
-            return False
-
-        # Step 4: Find announcement popup
-        popup_info = self._find_announcement_window()
-        if not popup_info:
-            logger.error("Announcement popup not found")
-            return False
-
-        hwnd = popup_info['hwnd']
-        popup = control_from_handle(hwnd)
-
-        # Step 5: Check if this is a new announcement or editing existing one
-        edit_box = popup.EditControl(AutomationId='xeditorInputId')
-        is_new_announcement = False
-
-        if edit_box and edit_box.Exists(maxSearchSeconds=1):
-            # Try to get the content by looking at the parent's text
-            try:
-                # Get all controls and look for the announcement content display
-                all_controls = []
-                def find_controls(ctrl, results, depth=0):
-                    if depth > 20:
-                        return
-                    results.append(ctrl)
-                    try:
-                        for child in ctrl.GetChildren():
-                            find_controls(child, results, depth + 1)
-                    except:
-                        pass
-
-                find_controls(popup, all_controls)
-
-                # Look for text control with announcement content
-                has_content = False
-                for ctrl in all_controls:
-                    name = ctrl.Name or ""
-                    # If there's a control with non-empty name that looks like announcement
-                    if name and len(name) > 5 and "自动化" in name or "test" in name.lower():
-                        has_content = True
-                        logger.info(f"Found existing announcement content: {name[:50]}")
-                        break
-
-                if has_content:
-                    is_new_announcement = False
-                    logger.info("Editing existing announcement")
-                else:
-                    is_new_announcement = True
-                    logger.info("New announcement (no existing content)")
-            except:
-                # Default to assuming it's new if we can't determine
-                is_new_announcement = True
-
-        # Step 6: If editing existing announcement, activate edit mode
-        if not is_new_announcement:
-            logger.info("Activating edit mode for existing announcement...")
-            if not self._click_edit_button(popup):
-                logger.error("Failed to activate edit mode")
-                return False
-
-        # Step 7: Input announcement content
-        if not self._input_announcement_content(popup, announcement, paste_from_clipboard=False):
-            return False
-
-        # Step 8: Click "完成" button
-        if not self._click_complete_button(hwnd):
-            return False
-
-        # Step 9: Click "发布" button in confirm dialog
-        if not self._click_publish_button(popup):
-            return False
-
-        logger.info(f"Announcement modified successfully for group: {group_name}")
-        return True
     def set_announcement_from_markdown(self, group_name: str, md_file_path: str) -> bool:
         """
         Set group announcement from a markdown file.
@@ -649,9 +548,7 @@ class GroupManager(BasePage):
         Callers can use as bool: `if not self._tab_to_control(...)`.
         """
         for i in range(max_tabs):
-            win32api.keybd_event(win32con.VK_TAB, 0, 0, 0)
-            time.sleep(0.05)
-            win32api.keybd_event(win32con.VK_TAB, 0, win32con.KEYEVENTF_KEYUP, 0)
+            self._press_key(win32con.VK_TAB, hold_time=0.05)
             time.sleep(0.3)
 
             focused = GetFocusedControl()
@@ -679,77 +576,35 @@ class GroupManager(BasePage):
         Returns:
             bool: True if successful
         """
-        from .chat_window import ChatWindow
         import pyperclip
 
         logger.info(f"Setting nickname '{nickname}' in group: {group_name}")
 
-        # Step 1: Open group chat
-        chat_window = ChatWindow(self._window)
-        if not chat_window.open_chat(group_name, target_type='group'):
-            logger.error(f"Failed to open group: {group_name}")
-            return False
-        time.sleep(1)
-
-        # Step 2: Open group detail panel
-        if not self._open_group_detail():
+        # Step 1: Open and focus the group detail panel
+        if not self._open_and_focus_group_detail(group_name):
             return False
 
-        # Step 3: Focus the detail panel
-        info_view = self.root.GroupControl(ClassName='mmui::ChatRoomMemberInfoView')
-        if not info_view.Exists(maxSearchSeconds=2):
-            logger.error("ChatRoomMemberInfoView not found")
-            return False
-
-        # Focus the panel without clicking (avoids triggering child controls)
-        info_view.SetFocus()
-        time.sleep(0.3)
-
-        # Step 4: Tab to "我在本群的昵称"
+        # Step 2: Tab to "我在本群的昵称"
         if not self._tab_to_control('我在本群的昵称'):
             return False
 
-        # Step 5: Enter → activate inline edit
-        win32api.keybd_event(win32con.VK_RETURN, 0, 0, 0)
-        time.sleep(0.1)
-        win32api.keybd_event(win32con.VK_RETURN, 0, win32con.KEYEVENTF_KEYUP, 0)
+        # Step 3: Enter → activate inline edit
+        self._press_key(win32con.VK_RETURN)
         time.sleep(0.5)
 
-        # Step 6: Ctrl+A to select all existing text, then paste new nickname
-        VK_A = 0x41
-        win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
-        win32api.keybd_event(VK_A, 0, 0, 0)
-        time.sleep(0.05)
-        win32api.keybd_event(VK_A, 0, win32con.KEYEVENTF_KEYUP, 0)
-        win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
-        time.sleep(0.2)
+        # Step 4: Ctrl+A to select all existing text, then paste new nickname
+        self._send_ctrl_combo(0x41, settle_time=0.2)
 
         pyperclip.copy(nickname)
         time.sleep(0.1)
-        VK_V = 0x56
-        win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
-        win32api.keybd_event(VK_V, 0, 0, 0)
-        time.sleep(0.05)
-        win32api.keybd_event(VK_V, 0, win32con.KEYEVENTF_KEYUP, 0)
-        win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
-        time.sleep(0.3)
+        self._send_ctrl_combo(0x56, settle_time=0.3)
 
-        # Step 7: Enter → submit → triggers confirmation dialog
-        win32api.keybd_event(win32con.VK_RETURN, 0, 0, 0)
-        time.sleep(0.1)
-        win32api.keybd_event(win32con.VK_RETURN, 0, win32con.KEYEVENTF_KEYUP, 0)
+        # Step 5: Enter → submit → triggers confirmation dialog
+        self._press_key(win32con.VK_RETURN)
         time.sleep(1)
 
-        # Step 8: Find "修改" button in the confirmation dialog (embedded in main window)
-        deadline = time.time() + 3.0
-        confirm_btn = None
-        while time.time() < deadline:
-            btn = self.root.ButtonControl(Name='修改')
-            if btn.Exists(maxSearchSeconds=0.2):
-                confirm_btn = btn
-                break
-            time.sleep(0.2)
-
+        # Step 6: Find "修改" button in the confirmation dialog (embedded in main window)
+        confirm_btn = self._find_button_with_deadline('修改')
         if not confirm_btn:
             logger.error("Nickname confirmation dialog not found")
             return False
@@ -766,35 +621,18 @@ class GroupManager(BasePage):
         Used for 消息免打扰 / 置顶聊天.
         Does nothing if the current state already matches the desired state.
         """
-        from .chat_window import ChatWindow
-
         logger.info(f"Setting '{control_name}'={'开启' if enable else '关闭'} for group: {group_name}")
 
-        # Step 1: Open group
-        chat_window = ChatWindow(self._window)
-        if not chat_window.open_chat(group_name, target_type='group'):
-            logger.error(f"Failed to open group: {group_name}")
-            return False
-        time.sleep(1)
-
-        # Step 2: Open group detail panel
-        if not self._open_group_detail():
+        # Step 1: Open and focus the group detail panel
+        if not self._open_and_focus_group_detail(group_name):
             return False
 
-        # Step 3: Focus the detail panel
-        info_view = self.root.GroupControl(ClassName='mmui::ChatRoomMemberInfoView')
-        if not info_view.Exists(maxSearchSeconds=2):
-            logger.error("ChatRoomMemberInfoView not found")
-            return False
-        info_view.SetFocus()
-        time.sleep(0.3)
-
-        # Step 4: Tab to the target toggle control
+        # Step 2: Tab to the target toggle control
         ctrl = self._tab_to_control(control_name)
         if not ctrl:
             return False
 
-        # Step 5: Read current state
+        # Step 3: Read current state
         p = ctrl.GetPattern(PatternId.TogglePattern)
         if not p:
             logger.error(f"'{control_name}' does not support TogglePattern")
@@ -805,13 +643,11 @@ class GroupManager(BasePage):
             logger.info(f"'{control_name}' already {'开启' if enable else '关闭'}, no action needed")
             return True
 
-        # Step 6: Press Space to toggle (Qt's TogglePattern.Toggle() is non-functional)
-        win32api.keybd_event(win32con.VK_SPACE, 0, 0, 0)
-        time.sleep(0.1)
-        win32api.keybd_event(win32con.VK_SPACE, 0, win32con.KEYEVENTF_KEYUP, 0)
+        # Step 4: Press Space to toggle (Qt's TogglePattern.Toggle() is non-functional)
+        self._press_key(win32con.VK_SPACE)
         time.sleep(0.5)
 
-        # Step 7: Verify by re-reading focus
+        # Step 5: Verify by re-reading focus
         new_ctrl = GetFocusedControl()
         if new_ctrl:
             new_p = new_ctrl.GetPattern(PatternId.TogglePattern)

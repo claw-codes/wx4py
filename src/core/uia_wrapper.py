@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 """UIAutomation wrapper for WeChat"""
-import sys
-import os
 
 from . import uiautomation as uia
 

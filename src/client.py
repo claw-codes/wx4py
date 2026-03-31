@@ -5,7 +5,6 @@ wx4py Client
 Main entry point for wx4py.
 """
 from .core.window import WeChatWindow
-from .core.exceptions import WeChatError, WeChatNotFoundError
 from .pages.chat_window import ChatWindow
 from .pages.group_manager import GroupManager
 from .utils.logger import get_logger
