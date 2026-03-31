@@ -7,6 +7,7 @@
 **让微信4.x自动化变得简单**
 
 [![Python Version](https://img.shields.io/badge/python-3.9+-blue)](https://www.python.org/downloads/)
+[![PyPI version](https://img.shields.io/pypi/v/wx4py.svg)](https://pypi.org/project/wx4py/)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-green)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%7C11-lightgrey)](https://www.microsoft.com/windows)
 [![WeChat](https://img.shields.io/badge/wechat-4.x-orange)](https://weixin.qq.com/)
@@ -268,22 +269,9 @@ wx4py 模拟真实用户操作，不修改微信客户端。但仍建议：
 
 ---
 
-## 更新日志
+## 更新记录
 
-### v0.1.2 (2026-03-30)
-
-- 修复首次运行时无法正常调用的问题，完善首次连接时的可访问性配置处理流程
-- 优化微信主窗口识别逻辑，避免误选辅助白屏窗口；必要时自动重启微信并提示重新登录
-- 增强聊天搜索框兼容性与重试恢复逻辑，提升联系人、群聊搜索和打开会话的稳定性
-- 补充 OpenClaw / AI Skill 的 UTF-8 编码说明，修复使用 skill 时可能出现的中文乱码问题
-
-### v0.1.1 (2026-03-27)
-
-- 首次发布
-- 消息发送、批量群发、文件传输
-- 聊天记录获取
-- 群组管理（公告、昵称、免打扰、置顶）
-- AI Skill 支持
+完整版本更新说明请查看 [CHANGELOG.md](./CHANGELOG.md)。
 
 ---
 
