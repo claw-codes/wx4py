@@ -305,10 +305,14 @@ wx4py 模拟真实用户操作，不修改微信客户端。但仍建议：
 
 ---
 
-<div align="center">
+## 致谢
 
-**如果这个项目帮你节省了时间，请给一个 Star ⭐**
+感谢 [linux.do 社区](https://linux.do/) 中相关讨论带来的启发，让这个项目的方向和落地方式逐步清晰起来。
 
-Made with ❤️
+同时也感谢 [wxauto](https://github.com/cluic/wxauto) 项目提供的思路参考，为本项目的实现带来了帮助。
 
-</div>
+---
+
+<p align="center"><strong>如果这个项目帮你节省了时间，请给一个 Star ⭐</strong></p>
+
+<p align="center">Made with ❤️</p>
