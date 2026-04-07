@@ -212,18 +212,19 @@ class ChatWindow(BasePage):
     def _find_target_result(
         self, results: Dict[str, List[SearchResult]], target: str, target_type: str
     ) -> Optional[SearchResult]:
-        """在搜索结果中查找匹配的目标。"""
-        primary_group = GROUP_CHATS if target_type == 'group' else GROUP_CONTACTS
-
-        for item in results.get(primary_group, []):
-            if target in item.name:
-                return item
-
-        # 查找"最常使用"分组中匹配的目标
+        """在搜索结果中查找匹配的目标，优先级：最常使用 > 联系人/群聊 > 功能"""
+        # 优先级1：最常使用（最高）
         for item in results.get(GROUP_FREQUENT, []):
             if target in item.name:
                 return item
 
+        # 优先级2：联系人/群聊
+        primary_group = GROUP_CHATS if target_type == 'group' else GROUP_CONTACTS
+        for item in results.get(primary_group, []):
+            if target in item.name:
+                return item
+
+        # 优先级3：功能
         if target_type == 'contact':
             for item in results.get(GROUP_FUNCTIONS, []):
                 if target in item.name:
