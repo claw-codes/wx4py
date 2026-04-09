@@ -238,7 +238,12 @@ def restart_wechat_process(hwnd: int) -> bool:
 
 def bring_window_to_front(hwnd: int) -> bool:
     """
-    将窗口置于前台，如果已最小化则恢复。
+    将窗口置于前台。
+
+    处理三种情况：
+    1. 窗口已最小化 → SW_RESTORE 恢复
+    2. 窗口隐藏到托盘（SW_HIDE 状态） → 先 SW_SHOW 再 SW_RESTORE
+    3. 窗口正常显示 → 直接 SetForegroundWindow
 
     Args:
         hwnd: 窗口句柄
@@ -247,7 +252,11 @@ def bring_window_to_front(hwnd: int) -> bool:
         bool: 成功时返回 True
     """
     try:
-        # 显示窗口
+        # 如果窗口不可见（隐藏到托盘），先 SW_SHOW 使其可见
+        if not win32gui.IsWindowVisible(hwnd):
+            win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
+            time.sleep(0.15)
+        # 恢复窗口（处理最小化状态）
         win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
         # 置于前台
         win32gui.SetForegroundWindow(hwnd)
@@ -269,6 +278,85 @@ def get_window_class(hwnd: int) -> str:
 def is_window_visible(hwnd: int) -> bool:
     """检查窗口是否可见"""
     return win32gui.IsWindowVisible(hwnd) != 0
+
+
+def activate_wechat_via_tray_icon() -> bool:
+    """
+    通过系统通知区域的微信托盘图标唤醒微信窗口。
+
+    当微信窗口被关闭（隐藏到系统托盘）时，单纯的 ShowWindow 无法
+    恢复 Qt 辅助功能树。此方法通过 UIA 查找通知区域中的微信图标
+    并调用 Invoke 操作，等效于用户手动点击托盘图标，从而触发微信
+    内部的窗口显示逻辑，使 UIA 控件树正确恢复。
+
+    此方法不依赖键盘快捷键，也不依赖任务栏的可见性（兼容
+    myDockFinder 等隐藏任务栏的工具），因为底层 Shell_TrayWnd
+    窗口始终存在。
+
+    Returns:
+        bool: 成功触发托盘图标点击返回 True
+    """
+    # 延迟导入，避免循环依赖（uiautomation 模块较重）
+    from ..core import uiautomation as uia
+
+    def _find_wechat_icon(ctrl, depth=0):
+        """递归查找名称包含'微信'的按钮控件"""
+        if depth > 8:
+            return None
+        try:
+            name = ctrl.Name or ''
+            if '微信' in name and ctrl.ControlTypeName == 'ButtonControl':
+                return ctrl
+        except Exception:
+            pass
+        try:
+            for ch in ctrl.GetChildren():
+                result = _find_wechat_icon(ch, depth + 1)
+                if result:
+                    return result
+        except Exception:
+            pass
+        return None
+
+    # 在主通知区域查找
+    shell_tray = win32gui.FindWindow('Shell_TrayWnd', None)
+    if shell_tray:
+        tray_root = uia.ControlFromHandle(shell_tray)
+        icon = _find_wechat_icon(tray_root)
+        if icon:
+            try:
+                pat = icon.GetInvokePattern()
+                if pat:
+                    pat.Invoke()
+                    return True
+            except Exception:
+                pass
+            try:
+                icon.Click()
+                return True
+            except Exception:
+                pass
+
+    # 在溢出区域查找
+    overflow = win32gui.FindWindow('NotifyIconOverflowWindow', None)
+    if overflow:
+        of_root = uia.ControlFromHandle(overflow)
+        icon = _find_wechat_icon(of_root)
+        if icon:
+            try:
+                pat = icon.GetInvokePattern()
+                if pat:
+                    pat.Invoke()
+                    return True
+            except Exception:
+                pass
+            try:
+                icon.Click()
+                return True
+            except Exception:
+                pass
+
+    return False
 
 
 def minimize_window(hwnd: int) -> bool:

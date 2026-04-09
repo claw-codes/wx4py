@@ -9,6 +9,8 @@ from ..utils.win32 import (
     bring_window_to_front,
     get_window_title,
     get_window_class,
+    is_window_visible,
+    activate_wechat_via_tray_icon,
     check_and_fix_registry,
     ensure_screen_reader_flag,
     restart_wechat_process,
@@ -179,6 +181,77 @@ class WeChatWindow:
         else:
             logger.warning("等待主窗口超时")
 
+    def _try_wake_and_retry_uia(self, initial_node_count: int) -> int:
+        """尝试唤醒隐藏到托盘的微信窗口，并重试 UIA 健康检查。
+
+        微信窗口被"关闭"（实际是隐藏到系统托盘）后，UIA 控件树不可访问。
+        单纯的 ShowWindow 无法恢复 Qt 辅助功能树，因为 Qt 内部状态未同步更新。
+        此方法通过 UIA 访问系统通知区域并调用微信托盘图标的
+        Invoke 操作，等效于用户手动点击托盘图标，从而触发微信内部
+        的窗口显示逻辑，使 Qt 辅助功能树正确恢复。
+
+        此方法不依赖键盘快捷键，也不依赖任务栏的可见性，
+        兼容 myDockFinder 等隐藏任务栏的工具。
+
+        Args:
+            initial_node_count: 初始检测到的 UIA 节点数
+
+        Returns:
+            int: 唤醒后检测到的 UIA 节点数
+        """
+        if not self._hwnd:
+            return initial_node_count
+
+        visible = is_window_visible(self._hwnd)
+        logger.info(
+            f"UIA 节点不足（{initial_node_count} 个），"
+            f"窗口可见性={visible}，尝试通过托盘图标唤醒微信..."
+        )
+
+        # 通过 UIA 访问系统通知区域并触发微信托盘图标的 Invoke
+        # 托盘图标是 toggle 行为：可见时点击会隐藏，隐藏时点击会显示。
+        # 因此必须先确保窗口是隐藏的，这样托盘图标点击才会触发显示逻辑。
+        import win32gui
+        import win32con
+        try:
+            if is_window_visible(self._hwnd):
+                win32gui.ShowWindow(self._hwnd, win32con.SW_HIDE)
+                time.sleep(0.3)
+        except Exception:
+            pass
+
+        try:
+            activated = activate_wechat_via_tray_icon()
+            if not activated:
+                logger.warning("未找到微信托盘图标，尝试 SW_SHOW + SW_RESTORE 回退...")
+                bring_window_to_front(self._hwnd)
+        except Exception as e:
+            logger.warning(f"托盘图标唤醒失败: {e}，尝试 SW_SHOW + SW_RESTORE 回退...")
+            bring_window_to_front(self._hwnd)
+
+        # 唤醒后多次重试 UIA 健康检查
+        # 窗口显示后 Qt 可能需要少量时间重建辅助功能树
+        node_count = initial_node_count
+        for attempt in range(6):
+            time.sleep(0.5)
+            # 重新创建 UIA wrapper 以获取最新的控件树
+            self._uia = UIAWrapper(self._hwnd)
+            node_count = _count_uia_descendants(self._uia.root)
+            logger.debug(
+                f"唤醒后 UIA 重试 ({attempt + 1}/6): 节点数={node_count}"
+            )
+            if node_count >= _MIN_UIA_TREE_NODES:
+                logger.info(
+                    f"窗口唤醒成功，UIA 控件树已恢复（{node_count} 个节点）"
+                )
+                return node_count
+
+        logger.warning(
+            f"窗口唤醒后 UIA 仍不可用（{node_count} 个节点），"
+            "可能是 Qt 辅助功能未初始化，需要重启微信。"
+        )
+        return node_count
+
     def _restart_and_reconnect(self):
         """重启微信并等待重新连接。
 
@@ -343,18 +416,19 @@ class WeChatWindow:
         self._uia = UIAWrapper(self._hwnd)
 
         # 第8步：UIA 健康检查
-        # Qt 辅助功能仅在进程启动时根据 SPI_GETSCREENREADER 标志初始化。
-        # 如果微信在标志关闭时已经启动，即使之后标志开启了，
-        # 当前进程的控件树仍然会为空。
-        # 根据实测：唤醒机制（WM_GETOBJECT + SPI 广播）在微信 UIA 失效后无法可靠恢复，
-        # 必须重启微信进程才能重新初始化 Qt 辅助功功能。
-        # 建议用户启用微信自动登录以实现无人值守。
+        # 微信窗口被关闭（隐藏到托盘）时，UIA 控件树不可访问。
+        # 需要通过 SW_SHOW + SW_RESTORE 显示窗口后重试。
         node_count = _count_uia_descendants(self._uia.root)
         logger.debug(f"UIA 健康检查: 控件树节点数={node_count}")
+
+        if node_count < _MIN_UIA_TREE_NODES:
+            # 尝试唤醒隐藏窗口并重试 UIA
+            node_count = self._try_wake_and_retry_uia(node_count)
+
         if node_count < _MIN_UIA_TREE_NODES:
             logger.warning(
                 f"UIA 控件树几乎为空（仅 {node_count} 个节点）。"
-                "微信进程的辅助功功能已失效，必须重启才能恢复。"
+                "微信进程的辅助功能已失效，必须重启才能恢复。"
                 "正在重启微信（建议启用微信自动登录以实现无人值守）..."
             )
             self._restart_and_reconnect()
