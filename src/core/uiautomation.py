@@ -2469,10 +2469,10 @@ def IsUserAnAdmin() -> bool:
 
 def RunScriptAsAdmin(argv: List[str], workingDirectory: str = None, showFlag: int = SW.ShowNormal) -> bool:
     """
-    Run a python script as administrator.
+    Run a python scripts as administrator.
     System will show a popup dialog askes you whether to elevate as administrator if UAC is enabled.
-    argv: List[str], a str list like sys.argv, argv[0] is the script file, argv[1:] are other arguments.
-    workingDirectory: str, the working directory for the script file.
+    argv: List[str], a str list like sys.argv, argv[0] is the scripts file, argv[1:] are other arguments.
+    workingDirectory: str, the working directory for the scripts file.
     showFlag: int, a value in class `SW`.
     Return bool, True if succeed.
     """

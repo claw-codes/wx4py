@@ -10,23 +10,25 @@ import win32gui
 import win32con
 import win32process
 import winreg
-from typing import List, Optional, Tuple
+from typing import List, Literal, Optional, Tuple
 
 from ..core.exceptions import RegistryError
 
 
 def ensure_screen_reader_flag() -> bool:
     """
-    Ensure the system-level Screen Reader flag (SPI_SETSCREENREADER) is ON.
+    确保系统级屏幕阅读器标志（SPI_SETSCREENREADER）为开启状态。
 
-    Qt-based applications (including WeChat 4.x) check this flag at startup
-    to decide whether to expose their accessibility / UI Automation tree.
-    If the flag is OFF, Qt never creates the accessible interfaces and UIA
-    sees only the top-level HWND with an empty child tree.
+    该标志用于告诉当前 Windows 会话“存在屏幕阅读器正在运行”。
+    某些 Qt 应用（包括微信 4.x）会在启动时读取这个标志，
+    决定是否暴露更完整的辅助功能 / UIAutomation 控件树。
+
+    注意：
+        该函数只修正当前系统会话中的辅助功能环境，
+        不作为“是否必须重启微信”的判断依据。
 
     Returns:
-        bool: True if the flag was changed (was OFF, now ON),
-              False if it was already ON.
+        bool: 标志原本为关闭并已开启时返回 True，否则返回 False。
     """
     SPI_GETSCREENREADER = 0x0046
     SPI_SETSCREENREADER = 0x0047
@@ -39,15 +41,15 @@ def ensure_screen_reader_flag() -> bool:
     )
 
     if pvParam.value:
-        return False  # already active
+        return False
 
     ctypes.windll.user32.SystemParametersInfoW(
         SPI_SETSCREENREADER, 1, 0, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE
     )
-    return True  # was off, now on
+    return True
 
 
-def check_and_fix_registry() -> bool:
+def check_and_fix_registry() -> Literal["unchanged", "fixed_zero", "created_missing"]:
     """
     检查并修复 UI Automation 的注册表设置。
 
@@ -55,7 +57,10 @@ def check_and_fix_registry() -> bool:
     如果值为 0 则设置为 1。
 
     Returns:
-        bool: 修改了注册表返回 True，无需修改返回 False
+        Literal["unchanged", "fixed_zero", "created_missing"]:
+            "unchanged": RunningState 已存在且无需修改
+            "fixed_zero": RunningState 原值为 0，已修复为 1
+            "created_missing": RunningState 缺失，已创建为 1
     """
     reg_path = r"SOFTWARE\Microsoft\Narrator\NoRoam"
     key_name = "RunningState"
@@ -77,16 +82,16 @@ def check_and_fix_registry() -> bool:
                 # 设置为 1
                 winreg.SetValueEx(key, key_name, 0, winreg.REG_DWORD, 1)
                 winreg.CloseKey(key)
-                return True
+                return "fixed_zero"
 
             winreg.CloseKey(key)
-            return False
+            return "unchanged"
 
         except FileNotFoundError:
             # 键不存在，创建并设置为 1
             winreg.SetValueEx(key, key_name, 0, winreg.REG_DWORD, 1)
             winreg.CloseKey(key)
-            return True
+            return "created_missing"
 
     except PermissionError as e:
         raise RegistryError(f"访问注册表时权限被拒绝: {e}")

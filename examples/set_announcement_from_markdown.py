@@ -2,7 +2,7 @@
 """
 Example: Set group announcement from markdown file
 
-This script demonstrates how to set a WeChat group announcement
+This scripts demonstrates how to set a WeChat group announcement
 from a markdown file with proper formatting preservation.
 """
 import sys

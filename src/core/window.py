@@ -10,11 +10,11 @@ from ..utils.win32 import (
     get_window_title,
     get_window_class,
     is_window_visible,
-    activate_wechat_via_tray_icon,
     check_and_fix_registry,
     ensure_screen_reader_flag,
     restart_wechat_process,
 )
+from ..utils.tray import restore_wechat_from_native_tray
 from ..utils.logger import get_logger
 from ..config import OPERATION_INTERVAL
 from . import uiautomation as uia
@@ -25,6 +25,18 @@ logger = get_logger(__name__)
 # 正常微信窗口控件树远超此阈值；如果只有根窗口 + MMUIRenderSubWindowHW = 2 个节点，
 # 说明 Qt 辅助功能未加载，需要重启微信。
 _MIN_UIA_TREE_NODES = 5
+_TRAY_SEARCH_TIMEOUT_SECONDS = 0.2
+_TRAY_OVERFLOW_WAIT_SECONDS = 0.8
+_TRAY_RESTORE_SETTLE_SECONDS = 0.5
+_TRAY_POST_RESTORE_WAIT_SECONDS = 1.0
+_TRAY_ICON_KEYWORDS = ("微信", "WeChat")
+_TRAY_EXPAND_KEYWORDS = (
+    "显示隐藏的图标",
+    "Show hidden icons",
+    "通知区域溢出",
+    "通知 V 形",
+    "V 形",
+)
 
 
 def _count_uia_descendants(ctrl, max_depth=4, limit=20):
@@ -57,6 +69,11 @@ def _count_uia_descendants(ctrl, max_depth=4, limit=20):
     return count
 
 
+def _should_restart_after_registry_fix(registry_status: str) -> bool:
+    """判断注册表修复后是否必须重启微信。"""
+    return registry_status == "fixed_zero"
+
+
 class WeChatWindow:
     """微信窗口管理器"""
 
@@ -65,6 +82,171 @@ class WeChatWindow:
         self._hwnd: int = None
         self._uia: UIAWrapper = None
         self._initialized = False
+
+    @staticmethod
+    def _safe_control_text(control, attr: str) -> str:
+        """安全读取 UIA 控件属性。"""
+        try:
+            return str(getattr(control, attr, "") or "")
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _get_control_children(control) -> list:
+        """安全获取 UIA 子控件。"""
+        try:
+            return control.GetChildren()
+        except Exception:
+            return []
+
+    def _is_wechat_tray_item(self, control) -> bool:
+        """判断控件是否看起来像微信托盘图标。"""
+        text = " ".join((
+            self._safe_control_text(control, "Name"),
+            self._safe_control_text(control, "ClassName"),
+        )).strip()
+        return bool(text) and any(keyword in text for keyword in _TRAY_ICON_KEYWORDS)
+
+    def _is_tray_expand_button(self, control) -> bool:
+        """判断控件是否是托盘隐藏区展开按钮。"""
+        text = " ".join((
+            self._safe_control_text(control, "Name"),
+            self._safe_control_text(control, "ClassName"),
+            self._safe_control_text(control, "ControlTypeName"),
+        )).strip()
+        if not text:
+            return False
+        if any(keyword in text for keyword in _TRAY_EXPAND_KEYWORDS):
+            return True
+        return (
+            self._safe_control_text(control, "ClassName") in {"Button", "Chevron", "TrayChevron"}
+            and "通知" in self._safe_control_text(control, "Name")
+        )
+
+    def _click_control(self, control, action_name: str) -> bool:
+        """统一处理 UIA 控件点击日志。"""
+        try:
+            control.Click()
+            logger.debug(f"{action_name}成功")
+            return True
+        except Exception as exc:
+            logger.debug(f"{action_name}失败: {exc}")
+            return False
+
+    def _find_wechat_tray_item_in_toolbar(self, toolbar):
+        """在任务栏工具栏中快速查找微信托盘图标。"""
+        for child in self._get_control_children(toolbar):
+            if self._is_wechat_tray_item(child):
+                return child
+        return None
+
+    def _find_wechat_tray_item_in_tree(self, root, max_depth: int = 6):
+        """遍历托盘控件树，兜底查找微信图标。"""
+        try:
+            for control, _depth in uia.WalkControl(root, includeTop=True, maxDepth=max_depth):
+                if self._is_wechat_tray_item(control):
+                    return control
+        except Exception as exc:
+            logger.debug(f"遍历托盘控件树失败: {exc}")
+        return None
+
+    def _find_wechat_tray_item_in_container(self, container):
+        """在托盘容器中查找微信图标。"""
+        for child in self._get_control_children(container):
+            class_name = self._safe_control_text(child, "ClassName")
+            control_type = self._safe_control_text(child, "ControlTypeName")
+            if class_name == 'ToolbarWindow32' or control_type == 'ToolBarControl':
+                candidate = self._find_wechat_tray_item_in_toolbar(child)
+                if candidate:
+                    return candidate
+            if self._is_wechat_tray_item(child):
+                return child
+        return self._find_wechat_tray_item_in_tree(container)
+
+    def _find_tray_expand_button(self, tray):
+        """查找托盘隐藏区展开按钮。"""
+        for child in self._get_control_children(tray):
+            if self._is_tray_expand_button(child):
+                return child
+        return None
+
+    def _get_tray_overflow_root(self):
+        """获取托盘隐藏区窗口。"""
+        candidates = [
+            uia.PaneControl(searchDepth=1, ClassName='NotifyIconOverflowWindow'),
+            uia.WindowControl(searchDepth=1, ClassName='NotifyIconOverflowWindow'),
+        ]
+        for candidate in candidates:
+            if candidate.Exists(maxSearchSeconds=_TRAY_SEARCH_TIMEOUT_SECONDS):
+                return candidate
+        return None
+
+    def _find_wechat_tray_item(self):
+        """查找微信托盘图标，必要时自动展开隐藏区。"""
+        tray = uia.PaneControl(searchDepth=3, ClassName='TrayNotifyWnd')
+        if tray.Exists(maxSearchSeconds=_TRAY_SEARCH_TIMEOUT_SECONDS):
+            candidate = self._find_wechat_tray_item_in_container(tray)
+            if candidate:
+                return candidate
+
+            expand_button = self._find_tray_expand_button(tray)
+            if expand_button and self._click_control(expand_button, "点击托盘展开按钮"):
+                deadline = time.time() + _TRAY_OVERFLOW_WAIT_SECONDS
+                while time.time() < deadline:
+                    overflow = self._get_tray_overflow_root()
+                    if overflow:
+                        candidate = self._find_wechat_tray_item_in_container(overflow)
+                        if candidate:
+                            return candidate
+                    time.sleep(0.1)
+
+        overflow = self._get_tray_overflow_root()
+        if overflow:
+            return self._find_wechat_tray_item_in_container(overflow)
+        return None
+
+    def _restore_via_tray_icon(self) -> bool:
+        """通过托盘图标恢复微信。"""
+        restored = restore_wechat_from_native_tray()
+        if restored:
+            time.sleep(_TRAY_RESTORE_SETTLE_SECONDS)
+            return True
+
+        logger.debug("原生托盘消息恢复失败，尝试 UIA 托盘图标点击")
+        tray_item = self._find_wechat_tray_item()
+        if tray_item:
+            logger.info("检测到微信主窗口不可见，尝试通过托盘图标恢复")
+            if self._click_control(tray_item, "点击微信托盘图标"):
+                time.sleep(_TRAY_RESTORE_SETTLE_SECONDS)
+                return True
+            logger.debug("UIA 托盘图标点击失败")
+
+        logger.debug("未能通过托盘恢复微信窗口")
+        return False
+
+    def _activate_hwnd(self, hwnd: int) -> bool:
+        """激活指定窗口，托盘隐藏时优先走托盘恢复。"""
+        if not hwnd:
+            return False
+
+        if not is_window_visible(hwnd):
+            if not self._restore_via_tray_icon():
+                logger.warning("检测到微信窗口不可见，但未能通过托盘图标恢复，已跳过窗口兜底激活。")
+                return False
+
+            deadline = time.time() + _TRAY_OVERFLOW_WAIT_SECONDS
+            while time.time() < deadline:
+                refreshed_hwnd = find_wechat_window()
+                if refreshed_hwnd and is_window_visible(refreshed_hwnd):
+                    self._hwnd = refreshed_hwnd
+                    time.sleep(_TRAY_POST_RESTORE_WAIT_SECONDS)
+                    return True
+                time.sleep(0.1)
+
+            logger.warning("托盘图标点击后，微信窗口仍未恢复为可见状态。")
+            return False
+
+        return bring_window_to_front(hwnd)
 
     def _try_click_login_button(self, hwnd: int) -> bool:
         """
@@ -168,7 +350,7 @@ class WeChatWindow:
                 if 'MainWindow' in cls:
                     logger.info(f"主窗口已出现: HWND={hwnd}")
                     self._hwnd = hwnd
-                    bring_window_to_front(hwnd)
+                    self._activate_hwnd(hwnd)
                     time.sleep(0.3)
                     return
                 if i % 10 == 0:
@@ -180,128 +362,6 @@ class WeChatWindow:
             logger.warning(f"未检测到 MainWindow，使用当前窗口: HWND={hwnd}")
         else:
             logger.warning("等待主窗口超时")
-
-    def _try_wake_and_retry_uia(self, initial_node_count: int) -> int:
-        """尝试唤醒隐藏到托盘的微信窗口，并重试 UIA 健康检查。
-
-        微信窗口被"关闭"（实际是隐藏到系统托盘）后，UIA 控件树不可访问。
-        单纯的 ShowWindow 无法恢复 Qt 辅助功能树，因为 Qt 内部状态未同步更新。
-        此方法通过 UIA 访问系统通知区域并调用微信托盘图标的
-        Invoke 操作，等效于用户手动点击托盘图标，从而触发微信内部
-        的窗口显示逻辑，使 Qt 辅助功能树正确恢复。
-
-        此方法不依赖键盘快捷键，也不依赖任务栏的可见性，
-        兼容 myDockFinder 等隐藏任务栏的工具。
-
-        Args:
-            initial_node_count: 初始检测到的 UIA 节点数
-
-        Returns:
-            int: 唤醒后检测到的 UIA 节点数
-        """
-        if not self._hwnd:
-            return initial_node_count
-
-        visible = is_window_visible(self._hwnd)
-        logger.info(
-            f"UIA 节点不足（{initial_node_count} 个），"
-            f"窗口可见性={visible}，尝试通过托盘图标唤醒微信..."
-        )
-
-        # 通过 UIA 访问系统通知区域并触发微信托盘图标的 Invoke
-        # 托盘图标是 toggle 行为：可见时点击会隐藏，隐藏时点击会显示。
-        # 因此必须先确保窗口在 Win32 层面也是隐藏的，
-        # 这样托盘图标点击才会触发"显示"逻辑而非"隐藏"。
-        import win32gui
-        import win32con
-        try:
-            if is_window_visible(self._hwnd):
-                win32gui.ShowWindow(self._hwnd, win32con.SW_HIDE)
-                time.sleep(0.5)
-        except Exception:
-            pass
-
-        # 多次尝试通过托盘图标唤醒
-        # 可能因为时机、溢出区域折叠等原因首次失败
-        activated = False
-        for tray_attempt in range(3):
-            try:
-                activated = activate_wechat_via_tray_icon()
-                if activated:
-                    logger.debug(f"托盘图标 invoke 成功（尝试 {tray_attempt + 1}/3）")
-                    # 等待微信内部处理窗口显示，Qt 需要时间重建 UIA 树
-                    time.sleep(2.0)
-                    # 微信唤醒后可能创建新窗口（HWND 改变），需要重新查找
-                    new_hwnd = find_wechat_window()
-                    if new_hwnd and new_hwnd != self._hwnd:
-                        logger.info(
-                            f"托盘唤醒后窗口句柄已变化: "
-                            f"{self._hwnd} -> {new_hwnd}"
-                        )
-                        self._hwnd = new_hwnd
-                    # 检查窗口是否已变为可见
-                    if new_hwnd and is_window_visible(new_hwnd):
-                        break
-                    # 窗口仍不可见，invoke 可能触发了隐藏（toggle 状态不同步），
-                    # 等一下再试一次（下次 invoke 会再 toggle 回来）
-                    logger.debug(
-                        f"invoke 后窗口仍不可见，再次尝试..."
-                    )
-                    time.sleep(0.5)
-                else:
-                    logger.warning(
-                        f"未找到微信托盘图标（尝试 {tray_attempt + 1}/3）"
-                    )
-                    time.sleep(0.5)
-            except Exception as e:
-                logger.warning(
-                    f"托盘图标唤醒失败: {e}（尝试 {tray_attempt + 1}/3）"
-                )
-                time.sleep(0.5)
-
-        if not activated:
-            logger.warning(
-                "托盘图标唤醒全部失败，尝试 SW_SHOW + SW_RESTORE 回退..."
-            )
-            bring_window_to_front(self._hwnd)
-
-        # 唤醒后确保窗口在前台
-        try:
-            bring_window_to_front(self._hwnd)
-        except Exception:
-            pass
-
-        # 唤醒后多次重试 UIA 健康检查
-        # Qt 恢复辅助功能树可能需要较长时间（特别是从托盘恢复时）
-        node_count = initial_node_count
-        for attempt in range(10):
-            time.sleep(0.8)
-            # 每隔几次重新查找窗口句柄（微信可能在恢复时重建窗口）
-            if attempt > 0 and attempt % 3 == 0:
-                new_hwnd = find_wechat_window()
-                if new_hwnd and new_hwnd != self._hwnd:
-                    logger.debug(
-                        f"UIA 重试中窗口句柄变化: "
-                        f"{self._hwnd} -> {new_hwnd}"
-                    )
-                    self._hwnd = new_hwnd
-            # 重新创建 UIA wrapper 以获取最新的控件树
-            self._uia = UIAWrapper(self._hwnd)
-            node_count = _count_uia_descendants(self._uia.root)
-            logger.debug(
-                f"唤醒后 UIA 重试 ({attempt + 1}/10): 节点数={node_count}"
-            )
-            if node_count >= _MIN_UIA_TREE_NODES:
-                logger.info(
-                    f"窗口唤醒成功，UIA 控件树已恢复（{node_count} 个节点）"
-                )
-                return node_count
-
-        logger.warning(
-            f"窗口唤醒后 UIA 仍不可用（{node_count} 个节点），"
-            "可能是 Qt 辅助功能未初始化，需要重启微信。"
-        )
-        return node_count
 
     def _restart_and_reconnect(self):
         """重启微信并等待重新连接。
@@ -361,7 +421,7 @@ class WeChatWindow:
             )
 
         # 等待窗口稳定
-        bring_window_to_front(hwnd)
+        self._activate_hwnd(hwnd)
         time.sleep(0.5)
 
         self._hwnd = hwnd
@@ -375,6 +435,8 @@ class WeChatWindow:
             node_count = _count_uia_descendants(self._uia.root)
             logger.debug(f"重启后 UIA 健康检查 ({check + 1}/10): 节点数={node_count}")
             if node_count >= _MIN_UIA_TREE_NODES:
+                self._initialized = True
+                logger.info("成功连接到微信（重启后）")
                 return
             time.sleep(0.5)  # 缩短等待间隔
 
@@ -388,36 +450,37 @@ class WeChatWindow:
         连接微信窗口。
 
         流程：
-        1. 检查并修复注册表中的 UI Automation 设置
-        2. 确保系统屏幕阅读器标志已开启
-        3. 查找微信窗口
-        4. 将窗口置于前台
-        5. 如果设置有变更，重启微信
-        6. 初始化 UIAutomation
-        7. 健康检查：验证 UIA 控件树是否可用
+        1. 修复辅助功能环境（注册表 + 屏幕阅读器标志）
+        2. 查找并激活微信窗口
+        3. 如有必要，重启并在内部完成重连
+        4. 检查登录态并初始化 UIAutomation
+        5. 记录 UIA 健康状态
 
         Returns:
             bool: 连接成功返回 True
 
         Raises:
-            WeChatNotFoundError: 找不到微信窗口或需要重启微信时抛出
+            WeChatNotFoundError: 找不到微信窗口或重连失败时抛出
         """
-        # 第1步：检查并修复注册表
-        logger.info("正在检查注册表中的 UI Automation 设置...")
-        registry_modified = False
+        # 第1步：修复辅助功能环境。
+        # 这里只会把环境修正到可用状态；是否必须重启微信，
+        # 只取决于 RunningState 是否从 0 修复为 1。
+        logger.info("正在检查辅助功能环境...")
+        registry_status = "unchanged"
         try:
-            registry_modified = check_and_fix_registry()
-            if registry_modified:
-                logger.info("注册表 RunningState 已从 0 修改为 1")
+            registry_status = check_and_fix_registry()
+            if registry_status == "fixed_zero":
+                logger.info("注册表 RunningState 已从 0 修复为 1")
+            elif registry_status == "created_missing":
+                logger.info("注册表 RunningState 缺失，已创建为 1")
             else:
                 logger.debug("注册表 RunningState 已正确设置")
         except Exception as e:
             logger.warning(f"注册表检查失败: {e}")
 
-        # 第2步：确保系统屏幕阅读器标志开启
-        # Qt 应用（含微信 4.x）在启动时检查此标志，
-        # 如果标志关闭则不会创建辅助功能对象。
-        screen_reader_changed = False
+        # 第2步：修复当前系统会话中的屏幕阅读器标志。
+        # 该标志用于帮助 Qt 应用暴露更完整的辅助功能树，
+        # 但不作为“是否必须重启微信”的判断依据。
         try:
             screen_reader_changed = ensure_screen_reader_flag()
             if screen_reader_changed:
@@ -427,10 +490,10 @@ class WeChatWindow:
         except Exception as e:
             logger.warning(f"屏幕阅读器标志检查失败: {e}")
 
-        # 如果任一设置被修改，微信需要重启才能生效
-        settings_changed = registry_modified or screen_reader_changed
+        # 只有 RunningState 原值为 0 时，才要求重启微信使修复生效。
+        settings_changed = _should_restart_after_registry_fix(registry_status)
 
-        # 第3步：查找微信窗口
+        # 第3步：查找并激活微信窗口。
         logger.info("正在查找微信窗口...")
         self._hwnd = find_wechat_window()
         if not self._hwnd:
@@ -439,62 +502,36 @@ class WeChatWindow:
             )
 
         logger.info(f"找到微信窗口: HWND={self._hwnd}")
+        self._activate_hwnd(self._hwnd)
+        time.sleep(OPERATION_INTERVAL)
 
-        # 第4步：将窗口置于前台
-        # 如果窗口被隐藏到托盘（用户叉掉微信），不要在此处使用 SW_SHOW。
-        # SW_SHOW 只能在 Win32 层面显示窗口，无法恢复 Qt 的 UIA 控件树；
-        # 更重要的是，它会干扰后续托盘唤醒流程：托盘图标是 toggle 行为，
-        # 如果 SW_SHOW 把窗口标记为"可见"，invoke 反而会触发"隐藏"。
-        # 窗口唤醒将由 _try_wake_and_retry_uia 通过托盘 invoke 正确处理。
-        window_hidden = not is_window_visible(self._hwnd)
-        if not window_hidden:
-            bring_window_to_front(self._hwnd)
-            time.sleep(OPERATION_INTERVAL)
-        else:
-            logger.info("窗口当前不可见（可能隐藏到托盘），跳过前台激活，将通过托盘唤醒...")
-
-        # 第5步：如果设置有变更，重启微信并自动重连
+        # 第4步：如有必要，重启并在 _restart_and_reconnect 内部完成重连。
         if settings_changed:
-            logger.warning("辅助功能设置已变更，正在重启微信以使其生效...")
+            logger.warning("检测到 RunningState 原值为 0，正在重启微信以使修复生效...")
             self._restart_and_reconnect()
-            self._initialized = True
-            logger.info("成功连接到微信（重启后）")
             return True
 
-        # 第6步：检测是否在登录界面
-        # 微信 UIA 失效后重新运行时，窗口可能仍显示登录界面，
-        # 需要先点击"进入微信"按钮完成登录。
-        # 注意：微信4.x 的主窗口类名为 Qt51514QWindowIcon（以 Qt 开头），
-        # 登录窗口类名通常包含 Login。
+        # 第5步：检测是否仍停留在登录界面。
         cls = get_window_class(self._hwnd)
-        is_likely_login = ('Login' in cls) and ('Qt' not in cls or 'MainWindow' in cls)
-        if is_likely_login:
-            logger.info(f"当前窗口可能是登录界面（ClassName={cls}），检查是否需要点击登录按钮...")
+        if 'MainWindow' not in cls:
+            logger.info(f"当前窗口不是主窗口（ClassName={cls}），检查是否在登录界面...")
             if self._try_click_login_button(self._hwnd):
-                # 成功点击登录按钮，等待主窗口出现
+                # 成功点击登录按钮后，等待主窗口出现并重新绑定。
                 self._wait_for_main_window()
 
-        # 第7步：初始化 UIAutomation
+        # 第6步：初始化 UIAutomation。
         logger.info("正在初始化 UIAutomation...")
         self._uia = UIAWrapper(self._hwnd)
 
-        # 第8步：UIA 健康检查
-        # 微信窗口被关闭（隐藏到托盘）时，UIA 控件树不可访问。
-        # 需要通过 SW_SHOW + SW_RESTORE 显示窗口后重试。
+        # 第7步：记录 UIA 健康状态。
+        # 这里只记录节点数，不再仅凭节点数直接触发重启。（检测准确度不够，即使这里检测只有1个节点，后续流程还是能正常走）
         node_count = _count_uia_descendants(self._uia.root)
         logger.debug(f"UIA 健康检查: 控件树节点数={node_count}")
-
-        if node_count < _MIN_UIA_TREE_NODES:
-            # 尝试唤醒隐藏窗口并重试 UIA
-            node_count = self._try_wake_and_retry_uia(node_count)
-
         if node_count < _MIN_UIA_TREE_NODES:
             logger.warning(
-                f"UIA 控件树几乎为空（仅 {node_count} 个节点）。"
-                "微信进程的辅助功能已失效，必须重启才能恢复。"
-                "正在重启微信（建议启用微信自动登录以实现无人值守）..."
+                f"UIA 控件树较少（仅 {node_count} 个节点），"
+                "继续按当前会话执行，不再仅凭该检测结果触发重启。"
             )
-            self._restart_and_reconnect()
 
         self._initialized = True
         logger.info("成功连接到微信")
@@ -558,5 +595,5 @@ class WeChatWindow:
             bool: 成功时返回 True
         """
         if self._hwnd:
-            return bring_window_to_front(self._hwnd)
+            return self._activate_hwnd(self._hwnd)
         return False

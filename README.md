@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="docs/images/logo.png" alt="wx4py" width="200">
+  <img src="docs/images/logo_bg.png" alt="wx4py">
 </p>
 
-<h1 align="center">wx4py</h1>
+<p align="center">访问官网查看演示视频：<a href="https://wx4py.biglongxia.com/">wx4py.biglongxia.com</a></p>
 
 <p align="center"><strong>让微信4.x自动化变得简单</strong></p>
 
@@ -13,14 +13,6 @@
   <a href="https://www.microsoft.com/windows"><img src="https://img.shields.io/badge/platform-Windows%2010%7C11-lightgrey" alt="Platform"></a>
   <a href="https://weixin.qq.com/"><img src="https://img.shields.io/badge/wechat-4.x-orange" alt="WeChat"></a>
 </p>
-
-<p align="center">
-  <a href="https://wx4py.biglongxia.com/">
-    <img src="docs/images/video_cover.png" alt="wx4py 视频演示" width="480">
-  </a>
-</p>
-
-<p align="center">视频演示：点击上方封面前往官网查看</p>
 
 ---
 
