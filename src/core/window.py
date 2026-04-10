@@ -14,6 +14,7 @@ from ..utils.win32 import (
     ensure_screen_reader_flag,
     restart_wechat_process,
 )
+from ..utils.tray import restore_wechat_from_native_tray
 from ..utils.logger import get_logger
 from ..config import OPERATION_INTERVAL
 from . import uiautomation as uia
@@ -206,17 +207,22 @@ class WeChatWindow:
 
     def _restore_via_tray_icon(self) -> bool:
         """通过托盘图标恢复微信。"""
+        restored = restore_wechat_from_native_tray()
+        if restored:
+            time.sleep(_TRAY_RESTORE_SETTLE_SECONDS)
+            return True
+
+        logger.debug("原生托盘消息恢复失败，尝试 UIA 托盘图标点击")
         tray_item = self._find_wechat_tray_item()
-        if not tray_item:
-            logger.debug("未找到微信托盘图标")
-            return False
+        if tray_item:
+            logger.info("检测到微信主窗口不可见，尝试通过托盘图标恢复")
+            if self._click_control(tray_item, "点击微信托盘图标"):
+                time.sleep(_TRAY_RESTORE_SETTLE_SECONDS)
+                return True
+            logger.debug("UIA 托盘图标点击失败")
 
-        logger.info("检测到微信主窗口不可见，尝试通过托盘图标恢复")
-        if not self._click_control(tray_item, "点击微信托盘图标"):
-            return False
-
-        time.sleep(_TRAY_RESTORE_SETTLE_SECONDS)
-        return True
+        logger.debug("未能通过托盘恢复微信窗口")
+        return False
 
     def _activate_hwnd(self, hwnd: int) -> bool:
         """激活指定窗口，托盘隐藏时优先走托盘恢复。"""
