@@ -210,35 +210,86 @@ class WeChatWindow:
 
         # 通过 UIA 访问系统通知区域并触发微信托盘图标的 Invoke
         # 托盘图标是 toggle 行为：可见时点击会隐藏，隐藏时点击会显示。
-        # 因此必须先确保窗口是隐藏的，这样托盘图标点击才会触发显示逻辑。
+        # 因此必须先确保窗口在 Win32 层面也是隐藏的，
+        # 这样托盘图标点击才会触发"显示"逻辑而非"隐藏"。
         import win32gui
         import win32con
         try:
             if is_window_visible(self._hwnd):
                 win32gui.ShowWindow(self._hwnd, win32con.SW_HIDE)
-                time.sleep(0.3)
+                time.sleep(0.5)
         except Exception:
             pass
 
-        try:
-            activated = activate_wechat_via_tray_icon()
-            if not activated:
-                logger.warning("未找到微信托盘图标，尝试 SW_SHOW + SW_RESTORE 回退...")
-                bring_window_to_front(self._hwnd)
-        except Exception as e:
-            logger.warning(f"托盘图标唤醒失败: {e}，尝试 SW_SHOW + SW_RESTORE 回退...")
+        # 多次尝试通过托盘图标唤醒
+        # 可能因为时机、溢出区域折叠等原因首次失败
+        activated = False
+        for tray_attempt in range(3):
+            try:
+                activated = activate_wechat_via_tray_icon()
+                if activated:
+                    logger.debug(f"托盘图标 invoke 成功（尝试 {tray_attempt + 1}/3）")
+                    # 等待微信内部处理窗口显示，Qt 需要时间重建 UIA 树
+                    time.sleep(2.0)
+                    # 微信唤醒后可能创建新窗口（HWND 改变），需要重新查找
+                    new_hwnd = find_wechat_window()
+                    if new_hwnd and new_hwnd != self._hwnd:
+                        logger.info(
+                            f"托盘唤醒后窗口句柄已变化: "
+                            f"{self._hwnd} -> {new_hwnd}"
+                        )
+                        self._hwnd = new_hwnd
+                    # 检查窗口是否已变为可见
+                    if new_hwnd and is_window_visible(new_hwnd):
+                        break
+                    # 窗口仍不可见，invoke 可能触发了隐藏（toggle 状态不同步），
+                    # 等一下再试一次（下次 invoke 会再 toggle 回来）
+                    logger.debug(
+                        f"invoke 后窗口仍不可见，再次尝试..."
+                    )
+                    time.sleep(0.5)
+                else:
+                    logger.warning(
+                        f"未找到微信托盘图标（尝试 {tray_attempt + 1}/3）"
+                    )
+                    time.sleep(0.5)
+            except Exception as e:
+                logger.warning(
+                    f"托盘图标唤醒失败: {e}（尝试 {tray_attempt + 1}/3）"
+                )
+                time.sleep(0.5)
+
+        if not activated:
+            logger.warning(
+                "托盘图标唤醒全部失败，尝试 SW_SHOW + SW_RESTORE 回退..."
+            )
             bring_window_to_front(self._hwnd)
 
+        # 唤醒后确保窗口在前台
+        try:
+            bring_window_to_front(self._hwnd)
+        except Exception:
+            pass
+
         # 唤醒后多次重试 UIA 健康检查
-        # 窗口显示后 Qt 可能需要少量时间重建辅助功能树
+        # Qt 恢复辅助功能树可能需要较长时间（特别是从托盘恢复时）
         node_count = initial_node_count
-        for attempt in range(6):
-            time.sleep(0.5)
+        for attempt in range(10):
+            time.sleep(0.8)
+            # 每隔几次重新查找窗口句柄（微信可能在恢复时重建窗口）
+            if attempt > 0 and attempt % 3 == 0:
+                new_hwnd = find_wechat_window()
+                if new_hwnd and new_hwnd != self._hwnd:
+                    logger.debug(
+                        f"UIA 重试中窗口句柄变化: "
+                        f"{self._hwnd} -> {new_hwnd}"
+                    )
+                    self._hwnd = new_hwnd
             # 重新创建 UIA wrapper 以获取最新的控件树
             self._uia = UIAWrapper(self._hwnd)
             node_count = _count_uia_descendants(self._uia.root)
             logger.debug(
-                f"唤醒后 UIA 重试 ({attempt + 1}/6): 节点数={node_count}"
+                f"唤醒后 UIA 重试 ({attempt + 1}/10): 节点数={node_count}"
             )
             if node_count >= _MIN_UIA_TREE_NODES:
                 logger.info(
@@ -390,8 +441,17 @@ class WeChatWindow:
         logger.info(f"找到微信窗口: HWND={self._hwnd}")
 
         # 第4步：将窗口置于前台
-        bring_window_to_front(self._hwnd)
-        time.sleep(OPERATION_INTERVAL)
+        # 如果窗口被隐藏到托盘（用户叉掉微信），不要在此处使用 SW_SHOW。
+        # SW_SHOW 只能在 Win32 层面显示窗口，无法恢复 Qt 的 UIA 控件树；
+        # 更重要的是，它会干扰后续托盘唤醒流程：托盘图标是 toggle 行为，
+        # 如果 SW_SHOW 把窗口标记为"可见"，invoke 反而会触发"隐藏"。
+        # 窗口唤醒将由 _try_wake_and_retry_uia 通过托盘 invoke 正确处理。
+        window_hidden = not is_window_visible(self._hwnd)
+        if not window_hidden:
+            bring_window_to_front(self._hwnd)
+            time.sleep(OPERATION_INTERVAL)
+        else:
+            logger.info("窗口当前不可见（可能隐藏到托盘），跳过前台激活，将通过托盘唤醒...")
 
         # 第5步：如果设置有变更，重启微信并自动重连
         if settings_changed:
@@ -404,9 +464,12 @@ class WeChatWindow:
         # 第6步：检测是否在登录界面
         # 微信 UIA 失效后重新运行时，窗口可能仍显示登录界面，
         # 需要先点击"进入微信"按钮完成登录。
+        # 注意：微信4.x 的主窗口类名为 Qt51514QWindowIcon（以 Qt 开头），
+        # 登录窗口类名通常包含 Login。
         cls = get_window_class(self._hwnd)
-        if 'MainWindow' not in cls:
-            logger.info(f"当前窗口不是主窗口（ClassName={cls}），检查是否在登录界面...")
+        is_likely_login = ('Login' in cls) and ('Qt' not in cls or 'MainWindow' in cls)
+        if is_likely_login:
+            logger.info(f"当前窗口可能是登录界面（ClassName={cls}），检查是否需要点击登录按钮...")
             if self._try_click_login_button(self._hwnd):
                 # 成功点击登录按钮，等待主窗口出现
                 self._wait_for_main_window()
