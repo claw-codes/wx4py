@@ -722,6 +722,86 @@ class GroupManager(BasePage):
         self._minimize_window()
         return True
 
+    def get_group_nickname(self, group_name: str) -> Optional[str]:
+        """
+        获取我在群聊中的昵称。
+
+        复用设置群昵称的同一条路径：打开群详情面板，Tab 定位到
+        "我在本群的昵称"，再尽量从当前控件或内联编辑框读取值。
+
+        Args:
+            group_name: 群名称
+
+        Returns:
+            Optional[str]: 读取成功返回群昵称，失败返回 None。
+        """
+        logger.info(f"获取我在群 '{group_name}' 中的昵称")
+
+        if not self._open_and_focus_group_detail(group_name):
+            return None
+
+        ctrl = self._tab_to_control('我在本群的昵称')
+        if not ctrl:
+            return None
+
+        nickname = self._extract_group_nickname_from_control(ctrl)
+        if nickname:
+            logger.info(f"读取到群昵称: {nickname}")
+            return nickname
+
+        # 有些版本需要进入内联编辑后，EditControl 才暴露当前昵称。
+        try:
+            self._press_key(win32con.VK_RETURN)
+            time.sleep(0.5)
+            focused = GetFocusedControl()
+            nickname = self._extract_group_nickname_from_control(focused)
+            self._press_key(win32con.VK_ESCAPE)
+            if nickname:
+                logger.info(f"从内联编辑框读取到群昵称: {nickname}")
+                return nickname
+        except Exception as exc:
+            logger.debug(f"从内联编辑框读取群昵称失败: {exc}")
+
+        logger.warning(f"未能读取群昵称: {group_name}")
+        return None
+
+    def _extract_group_nickname_from_control(self, ctrl) -> Optional[str]:
+        """从聚焦控件中提取群昵称。"""
+        if not ctrl:
+            return None
+
+        try:
+            pattern = ctrl.GetPattern(PatternId.ValuePattern)
+            if pattern:
+                value = (pattern.Value or "").strip()
+                if value and value != "我在本群的昵称":
+                    return value
+        except Exception:
+            pass
+
+        try:
+            name = (ctrl.Name or "").strip()
+        except Exception:
+            return None
+
+        if not name:
+            return None
+
+        marker = "我在本群的昵称"
+        if marker not in name:
+            return name
+
+        parts = [
+            part.strip()
+            for part in name.replace("\r", "\n").split("\n")
+            if part.strip() and part.strip() != marker
+        ]
+        if parts:
+            return parts[-1]
+
+        compact = name.replace(marker, "").strip(" ：:\n\t")
+        return compact or None
+
     def _set_toggle_in_detail_panel(self, group_name: str, control_name: str, enable: bool) -> bool:
         """
         打开群详情面板并按名称设置开关控件（CheckBoxControl）。

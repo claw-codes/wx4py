@@ -6,7 +6,9 @@ wx4py - Python 微信自动化工具
 """
 
 from ._version import __version__
+from .ai import AIClient, AIConfig, AIResponder
 from .client import WeChatClient
+from .core.listener import MessageEvent, WeChatGroupListener
 from .core.exceptions import (
     WeChatError,
     WeChatNotFoundError,
@@ -20,6 +22,11 @@ __author__ = "wx4py Team"
 
 __all__ = [
     "WeChatClient",
+    "AIClient",
+    "AIConfig",
+    "AIResponder",
+    "MessageEvent",
+    "WeChatGroupListener",
     "WeChatError",
     "WeChatNotFoundError",
     "WeChatNotConnectedError",

@@ -24,6 +24,7 @@
 - 📊 **需要分析群聊记录** —— 想统计活跃度、提取关键讨论，却没法导出数据
 - 🛠️ **批量管理多个群** —— 设置公告、免打扰、置顶，一个个点太麻烦
 - 🤖 **想让 AI 帮我操作微信** —— 不想写代码，只想说一句话就完成操作
+- 💬 **想做群聊机器人** —— 多个群同时监听，只在被 @ 时调用 AI 自动回复
 
 如果你有以上任何困扰，**wx4py** 可以帮你解决。
 
@@ -141,6 +142,40 @@ with WeChatClient() as wx:
 
 ---
 
+### AI 群聊机器人自动回复
+
+```python
+from wx4py import AIClient, AIConfig, AIResponder, WeChatClient
+
+groups = ["测试龙虾1", "测试龙虾2", "测试龙虾3"]
+
+ai = AIClient(
+    AIConfig(
+        base_url="https://api.siliconflow.cn/v1",
+        api_format="completions",
+        model="Pro/deepseek-ai/DeepSeek-V3.2",
+        api_key="你的 API Key",
+        enable_thinking=False,
+    )
+)
+
+with WeChatClient(auto_connect=True) as wx:
+    wx.auto_reply_groups(
+        groups,
+        AIResponder(ai, context_size=8, reply_on_at=True),
+        block=True,
+        reply_on_at=True,
+    )
+```
+
+**效果**：监听多个群聊，只有被 @ 时才调用 AI 回复；普通消息只监听不打扰。本库发送的回复会自动记录，避免机器人回复触发自己。
+
+<p align="center">
+  <img src="docs/images/group-ai-bot-demo.jpg" alt="wx4py AI 群聊机器人自动回复效果" width="360">
+</p>
+
+---
+
 ### 更多便捷操作
 
 | 你想做的事 | 一行代码 |
@@ -149,9 +184,12 @@ with WeChatClient() as wx:
 | 发消息给群 | `wx.chat_window.send_to("工作群", "收到", target_type='group')` |
 | 发文件 | `wx.chat_window.send_file_to("文件传输助手", r"path\file.pdf")` |
 | 搜索联系人/群 | `wx.chat_window.search("张三")` |
+| 获取群昵称 | `wx.group_manager.get_group_nickname("工作群")` |
 | 设置群昵称 | `wx.group_manager.set_group_nickname("工作群", "我的新昵称")` |
 | 开启免打扰 | `wx.group_manager.set_do_not_disturb("工作群", enable=True)` |
 | 置顶聊天 | `wx.group_manager.set_pin_chat("重要群", enable=True)` |
+| 监听多个群聊 | `wx.listen_groups(["群1", "群2"], on_message, block=True)` |
+| @ 触发 AI 自动回复 | `wx.auto_reply_groups(["群1"], AIResponder(ai), reply_on_at=True, block=True)` |
 
 ---
 
@@ -175,7 +213,8 @@ AI 会自动生成代码并执行。详见 [AI Skill 使用指南](#ai-skill-快
 | **安装难度** | pip 一键安装 | 需要配置复杂环境 |
 | **使用门槛** | 5分钟上手 | 需要深入了解底层 |
 | **稳定性** | 完善的错误处理 | 容易崩溃中断 |
-| **AI 集成** | 直接支持 Claude Code | 无 |
+| **监听与回复** | 多群独立窗口监听，发送队列避免抢占 | 通常需自行实现 |
+| **AI 集成** | 支持 Claude Code、OpenAI 兼容接口和自定义回调 | 通常需自行封装 |
 
 ---
 
@@ -259,6 +298,20 @@ wx4py 模拟真实用户操作，不修改微信客户端。但仍建议：
 - 控制发送频率
 - 避免大量群发营销内容
 - 使用非重要账号测试
+
+</details>
+
+<details>
+<summary><b>Q: AI 自动回复会回复所有群消息吗？</b></summary>
+
+不会。推荐使用 `reply_on_at=True`，普通消息只监听和打印，只有群消息 @ 当前群昵称时才会调用回复逻辑。
+
+</details>
+
+<details>
+<summary><b>Q: 只能使用 wx4py 内置的 AIClient 吗？</b></summary>
+
+不是。`auto_reply_groups()` 接收任意回调函数，只要返回字符串就会自动发送；你可以接入自己的 HTTP 客户端、公司内部模型或其他 AI SDK。
 
 </details>
 

@@ -6,6 +6,7 @@ wx4py 的主入口。
 """
 from .core.window import WeChatWindow
 from .core.exceptions import WeChatNotFoundError
+from .core.listener import WeChatGroupListener
 from .pages.chat_window import ChatWindow
 from .pages.group_manager import GroupManager
 from .utils.logger import get_logger
@@ -43,6 +44,7 @@ class WeChatClient:
         self._window = WeChatWindow()
         self._chat_window: ChatWindow = None
         self._group_manager: GroupManager = None
+        self._listeners = []
 
         if auto_connect:
             self.connect()
@@ -71,10 +73,66 @@ class WeChatClient:
 
     def disconnect(self) -> None:
         """断开微信连接"""
+        for listener in list(self._listeners):
+            listener.stop()
+        self._listeners.clear()
         self._window.disconnect()
         self._chat_window = None
         self._group_manager = None
         logger.info("已断开微信连接")
+
+    def listen_groups(
+        self,
+        groups,
+        on_message,
+        *,
+        auto_reply: bool = True,
+        ignore_client_sent: bool = True,
+        block: bool = False,
+        **options,
+    ) -> WeChatGroupListener:
+        """监听多个群聊，支持回调返回文本自动回复。
+
+        Args:
+            groups: 群聊名称列表。
+            on_message: 消息回调，入参为 MessageEvent。返回非空字符串时自动回复。
+            auto_reply: 是否自动发送回调返回的文本。
+            ignore_client_sent: 是否忽略本库发送后回流的消息。
+            block: 是否阻塞当前线程运行监听循环。
+            **options: 传给监听器的调度参数，例如 tick、batch_size、tail_size、
+                reply_on_at、group_nicknames。
+
+        Returns:
+            WeChatGroupListener: 监听器实例，可调用 stop() 停止。
+        """
+        if not self.is_connected:
+            self.connect()
+
+        listener = WeChatGroupListener(
+            self,
+            groups,
+            on_message,
+            auto_reply=auto_reply,
+            ignore_client_sent=ignore_client_sent,
+            **options,
+        )
+        self._listeners.append(listener)
+        return listener.start(block=block)
+
+    def auto_reply_groups(self, groups, reply_func, *, block: bool = False, **options) -> WeChatGroupListener:
+        """监听群聊并自动回复。
+
+        ``reply_func`` 接收 MessageEvent，返回要回复的字符串；返回 None 或空字符串
+        表示不回复。
+        """
+        return self.listen_groups(
+            groups,
+            reply_func,
+            auto_reply=True,
+            ignore_client_sent=True,
+            block=block,
+            **options,
+        )
 
     @property
     def window(self) -> WeChatWindow:
