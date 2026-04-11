@@ -39,6 +39,7 @@ AI 会自动生成代码并执行！
 ## 📚 更多
 
 - 完整功能：[README.md](../../README.md)
+- 接口文档：[API_GUIDE.md](./API_GUIDE.md)
 - AI Skill：[wx4-skill/SKILL.md](../../wx4-skill/SKILL.md)
 - 示例代码：[examples/](../../examples/)
 

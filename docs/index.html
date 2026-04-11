@@ -13,7 +13,7 @@
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="wx4py">
   <meta property="og:title" content="wx4py | OpenClaw（龙虾）一句话操作微信 4.x">
-  <meta property="og:description" content="让微信群发、发文件、改公告、导出聊天记录这些重复操作自动化，也可以直接让 OpenClaw 用自然语言帮你操作微信，类似机器人。">
+  <meta property="og:description" content="快捷搭建群聊机器人，让微信群发、发文件、改公告、导出聊天记录这些重复操作自动化，也可以直接让 OpenClaw 用自然语言帮你操作微信。">
   <meta property="og:url" content="https://wx4py.biglongxia.com/">
   <meta property="og:image" content="https://wx4py.biglongxia.com/images/og-image.svg">
   <meta property="og:image:alt" content="wx4py 官网分享图，突出 OpenClaw（龙虾）一句话操作微信 4.x">
@@ -22,7 +22,7 @@
   <meta property="og:image:height" content="630">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="wx4py | OpenClaw（龙虾）一句话操作微信 4.x">
-  <meta name="twitter:description" content="微信 4.x 自动化工具，支持微信群发、自动发文件、群公告更新、聊天记录导出和 OpenClaw 自然语言操作，类似机器人。">
+  <meta name="twitter:description" content="快捷搭建群聊机器人，微信 4.x 自动化工具，支持微信群发、自动发文件、群公告更新、聊天记录导出和 OpenClaw 自然语言操作。">
   <meta name="twitter:image" content="https://wx4py.biglongxia.com/images/og-image.svg">
   <meta name="twitter:image:alt" content="wx4py 官网分享图，突出 OpenClaw（龙虾）一句话操作微信 4.x">
   <link rel="icon" type="image/png" href="./images/logo.png">
@@ -36,7 +36,7 @@
           "name": "wx4py",
           "url": "https://wx4py.biglongxia.com/",
           "inLanguage": "zh-CN",
-          "description": "wx4py 是一个面向中文用户的微信 4.x 自动化项目，支持微信群发、自动发文件、群公告更新、聊天记录导出，并支持 OpenClaw（龙虾）自然语言操作，类似机器人。"
+          "description": "wx4py 是一个面向中文用户的微信 4.x 自动化项目，支持快捷搭建群聊机器人、微信群发、自动发文件、群公告更新、聊天记录导出，并支持 OpenClaw（龙虾）自然语言操作。"
         },
         {
           "@type": "Organization",
@@ -57,10 +57,10 @@
       "name": "wx4py",
       "applicationCategory": "DeveloperApplication",
       "operatingSystem": "Windows 10, Windows 11",
-      "description": "wx4py 是一个微信 4.x 自动化工具，支持批量微信群发、自动发文件、批量修改群公告、导出聊天记录，并可接入 OpenClaw（龙虾）或 Claude Code 通过自然语言直接操作微信，类似机器人。",
+      "description": "wx4py 是一个微信 4.x 自动化工具，支持快捷搭建群聊机器人、批量微信群发、自动发文件、批量修改群公告、导出聊天记录，并可接入 OpenClaw（龙虾）或 Claude Code 通过自然语言直接操作微信。",
       "url": "https://wx4py.biglongxia.com/",
       "image": "https://wx4py.biglongxia.com/images/logo.png",
-      "softwareVersion": "0.2.0",
+      "softwareVersion": "0.2.1",
       "downloadUrl": "https://github.com/claw-codes/wx4py",
       "codeRepository": "https://github.com/claw-codes/wx4py",
       "license": "https://github.com/claw-codes/wx4py/blob/main/LICENSE",
@@ -111,6 +111,7 @@
         <a href="#scenarios">痛点与解决</a>
         <a href="#features">为什么选它</a>
         <a href="#quickstart">快速开始</a>
+        <a href="https://github.com/claw-codes/wx4py/blob/main/README.md" target="_blank" rel="noopener noreferrer">文档</a>
         <a href="#faq">FAQ</a>
         <a href="https://github.com/claw-codes/wx4py" target="_blank" rel="noopener noreferrer">GitHub</a>
       </nav>
@@ -127,12 +128,13 @@
             <span>一句话操作微信 4.x</span>
           </h1>
           <p class="hero-lead">
-            wx4py 把微信群发、自动发文件、批量改群公告、聊天记录导出这些重复操作收拢成一个可靠的 Windows 工具。
+            wx4py 把群聊机器人、微信群发、自动发文件、批量改群公告、聊天记录导出这些重复操作收拢成一个可靠的 Windows 工具。
             你可以写 Python，也可以直接让 OpenClaw 或 Claude Code 用自然语言帮你执行。
           </p>
           <div class="hero-actions">
             <a class="button button-primary" href="https://github.com/claw-codes/wx4py" target="_blank" rel="noopener noreferrer">查看源码</a>
             <a class="button button-secondary" href="#quickstart">立即开始</a>
+            <a class="button button-secondary" href="https://github.com/claw-codes/wx4py/blob/main/README.md" target="_blank" rel="noopener noreferrer">文档</a>
           </div>
           <ul class="hero-points" aria-label="关键信息">
             <li>适用于 Windows 10 / 11</li>
@@ -188,38 +190,38 @@ with WeChatClient() as wx:
       <div class="container">
         <div class="section-heading reveal">
           <p class="eyebrow">真实痛点</p>
-          <h2>这些微信重复操作，wx4py 可以！</h2>
+          <h2>这些典型场景，wx4py 都能覆盖</h2>
         </div>
         <div class="solution-grid">
           <article class="solution-card reveal">
-            <h3>一个通知要发五六个群</h3>
-            <p>每次复制、搜索、切群、粘贴、发送，动作不复杂，但很耗神，也容易漏群。</p>
-            <p class="solution-answer"><strong>wx4py 可以：</strong>把同一条通知批量发到多个群，适合例会通知、日报提醒、运营播报。</p>
+            <h3>要监听某个群里的新消息</h3>
+            <p>你关心的不是一次发送，而是这个群什么时候来了新消息、有没有人 @ 你、后续是否要继续处理。</p>
+            <p class="solution-answer"><strong>wx4py 可以：</strong>为指定群打开独立监听窗口，持续接收新消息事件，适合告警群、值班群和运营群。</p>
           </article>
           <article class="solution-card reveal">
-            <h3>同一个文件反复上传</h3>
-            <p>日报、周报、资料包分发给不同群时，最烦的是重复找文件、重复拖拽、重复确认。</p>
-            <p class="solution-answer"><strong>wx4py 可以：</strong>把同一份文件快速发给多个群或联系人，减少重复上传和重复确认。</p>
+            <h3>需要把群消息转给指定联系人或群</h3>
+            <p>比如告警群里的新消息要同步给值班同学，或者项目群 A 的动态要转到项目群 B。</p>
+            <p class="solution-answer"><strong>wx4py 可以：</strong>监听群消息后自动转发给指定联系人或另一个群，适合值班转发、消息同步和简单路由。</p>
           </article>
           <article class="solution-card reveal">
-            <h3>群公告要一个个改</h3>
-            <p>项目群、部门群、值班群的公告内容经常同步更新，手工点进去改非常磨人。</p>
-            <p class="solution-answer"><strong>wx4py 可以：</strong>批量更新多个群公告，适合会议通知、排班提醒和规则同步。</p>
+            <h3>只想在被 @ 时再让 AI 出手</h3>
+            <p>群里消息很多，但你不希望机器人每条都回，只想在明确被点名时再处理。</p>
+            <p class="solution-answer"><strong>wx4py 可以：</strong>结合 AI 接口做 @ 触发自动回复，普通消息只监听不打扰。</p>
           </article>
           <article class="solution-card reveal">
-            <h3>聊天记录想导出来看看</h3>
-            <p>不是为了爬数据，而是想做基础分析、留档或者看看最近讨论都集中在哪些话题。</p>
-            <p class="solution-answer"><strong>wx4py 可以：</strong>导出聊天记录做后续分析，也能获取群成员列表辅助整理信息。</p>
+            <h3>同一份消息或文件要反复发送</h3>
+            <p>手工复制、切换会话、反复上传并不难，但非常耗时，而且容易漏发或发错。</p>
+            <p class="solution-answer"><strong>wx4py 可以：</strong>发消息、批量发送、发文件都已封装好，适合通知、资料分发和日常提醒。</p>
           </article>
           <article class="solution-card reveal">
-            <h3>临时任务还要专门写脚本</h3>
-            <p>很多操作只做一次，但又不想手动点。这时候更希望直接说一句话，让 OpenClaw 帮你做完。</p>
-            <p class="solution-answer"><strong>wx4py 可以：</strong>接入 OpenClaw 或 Claude Code，让你直接用自然语言执行微信操作。</p>
+            <h3>群公告、免打扰、置顶要一个个改</h3>
+            <p>项目群、部门群和值班群经常要同步公告，或者统一调整免打扰、置顶状态。</p>
+            <p class="solution-answer"><strong>wx4py 可以：</strong>读取群成员、获取群昵称、修改公告、设置免打扰和置顶，覆盖常见群管理操作。</p>
           </article>
           <article class="solution-card reveal">
-            <h3>担心工具太重、太折腾</h3>
-            <p>很多自动化工具一上来就要配一堆环境、理解一堆概念，真正要解决的问题反而被拖慢了。</p>
-            <p class="solution-answer"><strong>wx4py 可以：</strong>用更轻量的方式接入微信 4.x，既能写 Python，也能直接交给 OpenClaw 处理。</p>
+            <h3>希望先写脚本，后面再交给 AI</h3>
+            <p>很多团队一开始只想要 Python 能跑，后面再考虑接 OpenClaw、Claude Code 或其他 AI 工具。</p>
+            <p class="solution-answer"><strong>wx4py 可以：</strong>既保留清晰的 Python API，也方便后续接入自然语言操作，不需要一开始就押注某种工作流。</p>
           </article>
         </div>
       </div>
@@ -229,8 +231,8 @@ with WeChatClient() as wx:
       <div class="container">
         <div class="section-heading reveal">
           <p class="eyebrow">为什么用起来顺手</p>
-          <h2>为什么适合日常使用</h2>
-          <p>这一块不再重复群发、发文件这些功能，而是说明 wx4py 的使用方式和产品特性。</p>
+          <h2>为什么适合作为微信自动化底座</h2>
+          <p>这部分不重复列功能，而是说明为什么它适合拿来写脚本、做群机器人或接入自然语言工具。</p>
         </div>
         <div class="feature-grid">
           <article class="feature-card reveal">
@@ -238,24 +240,24 @@ with WeChatClient() as wx:
             <p>定位明确，直接服务 Windows 桌面端微信 4.x，不是泛泛而谈的聊天自动化方案。</p>
           </article>
           <article class="feature-card reveal">
-            <h3>自然语言也能用</h3>
-            <p>不是只能自己写脚本。接入 OpenClaw 或 Claude Code 后，可以直接用自然语言下达操作。</p>
+            <h3>统一入口更清晰</h3>
+            <p>群消息监听、转发和自动回复统一走 <code>process_groups()</code>，组合场景不需要再拆成多套接口。</p>
           </article>
           <article class="feature-card reveal">
-            <h3>脚本化能力完整</h3>
-            <p>如果你要做定时任务、批处理或二次开发，也可以继续走 Python 代码方式接入。</p>
+            <h3>既能写脚本，也能接 AI</h3>
+            <p>你可以直接用 Python 调 API，也可以再接 OpenClaw、Claude Code 或兼容 OpenAI 接口的模型服务。</p>
           </article>
           <article class="feature-card reveal">
-            <h3>上手成本低</h3>
-            <p>官网和 README 都围绕真实任务组织，不需要先理解复杂框架再开始使用。</p>
+            <h3>多群处理更接近日常场景</h3>
+            <p>支持多个群独立窗口监听、消息转发和 @ 触发回复，适合值班、运营、同步和群助手类需求。</p>
           </article>
           <article class="feature-card reveal">
-            <h3>轻量且开源</h3>
-            <p>仓库结构直接、纯 Python、无后端依赖，适合自己看代码、调整脚本和长期维护。</p>
+            <h3>发送链路做了串行处理</h3>
+            <p>转发和 AI 回复最终走统一发送队列，减少窗口抢占、串消息和误发到错误会话的风险。</p>
           </article>
           <article class="feature-card reveal">
-            <h3>适合一次性任务</h3>
-            <p>很多需求不是要搭系统，而是想立刻完成一次微信群发或文件分发，这正是它擅长的场景。</p>
+            <h3>对小白也更友好</h3>
+            <p>README、接口文档和示例都按真实任务组织，先改顶部常量再运行，不需要先理解一堆内部细节。</p>
           </article>
         </div>
       </div>
@@ -364,6 +366,7 @@ with WeChatClient() as wx:
         </div>
         <div class="cta-actions">
           <a class="button button-primary" href="https://github.com/claw-codes/wx4py" target="_blank" rel="noopener noreferrer">访问 GitHub 仓库</a>
+          <a class="button button-secondary" href="https://github.com/claw-codes/wx4py/blob/main/README.md" target="_blank" rel="noopener noreferrer">查看文档</a>
           <a class="button button-secondary" href="#quickstart">查看快速开始</a>
         </div>
       </div>
@@ -382,7 +385,8 @@ with WeChatClient() as wx:
       <div class="footer-links">
         <a href="https://github.com/claw-codes/wx4py" target="_blank" rel="noopener noreferrer">GitHub 仓库</a>
         <a href="https://github.com/claw-codes/wx4py/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">License</a>
-        <a href="./guide/QUICKSTART.md">快速说明</a>
+        <a href="https://github.com/claw-codes/wx4py/blob/main/README.md" target="_blank" rel="noopener noreferrer">文档</a>
+        <a href="https://github.com/claw-codes/wx4py/blob/main/docs/guide/QUICKSTART.md" target="_blank" rel="noopener noreferrer">快速说明</a>
       </div>
       <p class="copyright">© 2026 wx4py. Released under AGPL-3.0-or-later.</p>
     </div>

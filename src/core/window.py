@@ -4,7 +4,7 @@ import time
 
 from .uia_wrapper import UIAWrapper
 from .exceptions import WeChatNotFoundError
-from ..utils.win32 import (
+from .win32 import (
     find_wechat_window,
     bring_window_to_front,
     get_window_title,
@@ -14,7 +14,7 @@ from ..utils.win32 import (
     ensure_screen_reader_flag,
     restart_wechat_process,
 )
-from ..utils.tray import restore_wechat_from_native_tray
+from .tray import restore_wechat_from_native_tray
 from ..utils.logger import get_logger
 from ..config import OPERATION_INTERVAL
 from . import uiautomation as uia
