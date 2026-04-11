@@ -4,3 +4,7 @@ pyperclip
 markdown
 beautifulsoup4
 Pillow
+numpy<2
+opencv-contrib-python<=4.6.0.66
+paddlepaddle==2.6.2
+paddleocr==2.7.3

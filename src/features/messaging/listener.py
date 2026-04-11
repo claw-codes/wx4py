@@ -34,12 +34,456 @@ from ...utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# 截图临时目录
+_SCREENSHOT_DIR = os.path.join(os.environ.get('TEMP', os.environ.get('TMP', '.')), 'wx4py_screenshots')
+_MAX_SCREENSHOTS = 100  # 最大保留截图数量
+
+
+def _cleanup_screenshots():
+    """清理旧的截图文件，保留最新的 _MAX_SCREENSHOTS 个"""
+    try:
+        if not os.path.exists(_SCREENSHOT_DIR):
+            return
+        
+        # 获取所有截图文件及其修改时间
+        files = []
+        for f in os.listdir(_SCREENSHOT_DIR):
+            if f.endswith('.png'):
+                path = os.path.join(_SCREENSHOT_DIR, f)
+                try:
+                    mtime = os.path.getmtime(path)
+                    files.append((mtime, path))
+                except Exception:
+                    pass
+        
+        # 如果文件数量超过限制，删除最旧的
+        if len(files) > _MAX_SCREENSHOTS:
+            files.sort()  # 按修改时间排序（最旧的在前）
+            to_delete = files[:-_MAX_SCREENSHOTS]
+            for _, path in to_delete:
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+            logger.debug(f"清理了 {len(to_delete)} 个旧截图文件")
+    except Exception as e:
+        logger.debug(f"清理截图失败: {e}")
+
+
+def _delete_screenshot(path: str):
+    """删除截图文件"""
+    try:
+        if path and os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+
+def _get_screenshot_path() -> str:
+    """获取截图保存路径"""
+    if not os.path.exists(_SCREENSHOT_DIR):
+        try:
+            os.makedirs(_SCREENSHOT_DIR)
+        except Exception:
+            pass
+    
+    # 清理旧截图
+    _cleanup_screenshots()
+    
+    import uuid
+    return os.path.join(_SCREENSHOT_DIR, f'{uuid.uuid4().hex[:8]}.png')
+
+
+def _capture_window_region(hwnd: int, left: int, top: int, right: int, bottom: int) -> Optional[str]:
+    """
+    截取窗口指定区域
+
+    Args:
+        hwnd: 窗口句柄
+        left, top, right, bottom: 截取区域坐标（屏幕坐标）
+
+    Returns:
+        截图保存的临时文件路径，失败返回None
+    """
+    try:
+        from PIL import Image, ImageGrab
+
+        # 检查窗口状态
+        import win32gui
+        try:
+            # 获取窗口区域
+            win_rect = win32gui.GetWindowRect(hwnd)
+            # 如果是最小化窗口（坐标为负），需要特殊处理
+            if win_rect[0] < 0 or win_rect[1] < 0:
+                logger.info(f"窗口最小化，使用PrintWindow截取整个窗口")
+                # 截取整个窗口，返回 (路径, 宽度, 高度)
+                return _capture_window_full(hwnd)
+        except Exception as e:
+            logger.debug(f"获取窗口信息失败: {e}")
+
+        # 方法1：使用PIL的ImageGrab（简单但可能被遮挡）
+        try:
+            screenshot = ImageGrab.grab(bbox=(left, top, right, bottom), include_layered_windows=False, all_screens=False)
+            temp_path = _get_screenshot_path()
+            screenshot.save(temp_path, 'PNG')
+            return temp_path
+        except Exception:
+            pass
+
+        # 方法2：使用Win32 API直接绘制窗口（不被遮挡）
+        return _capture_window_dc(hwnd, left, top, right, bottom)
+
+    except Exception as e:
+        logger.debug(f"截图失败: {e}")
+        return None
+
+
+def _capture_window_full(hwnd: int) -> Optional[Tuple[str, int, int]]:
+    """
+    使用PrintWindow API截取整个窗口内容（完全静默，不改变窗口状态）
+
+    即使窗口最小化，也能通过PrintWindow获取窗口内容的位图。
+    不会恢复或最小化窗口，完全静默操作。
+
+    Args:
+        hwnd: 窗口句柄
+
+    Returns:
+        Tuple[截图路径, 窗口宽度, 窗口高度]，失败返回None
+    """
+    import ctypes
+
+    try:
+        import win32gui
+        import win32ui
+        import win32con
+        from PIL import Image
+
+        user32 = ctypes.windll.user32
+
+        # 检查窗口状态
+        win_rect = win32gui.GetWindowRect(hwnd)
+
+        # 获取窗口客户区大小
+        # 对于最小化的窗口，GetClientRect 返回的是图标化后的大小
+        # 需要使用 GetWindowRect 来获取实际窗口大小
+        win_rect = win32gui.GetWindowRect(hwnd)
+        client_left, client_top, client_right, client_bottom = win32gui.GetClientRect(hwnd)
+
+        # 转换为屏幕坐标
+        screen_left, screen_top = win32gui.ClientToScreen(hwnd, (client_left, client_top))
+        screen_right, screen_bottom = win32gui.ClientToScreen(hwnd, (client_right, client_bottom))
+
+        width = screen_right - screen_left
+        height = screen_bottom - screen_top
+
+        # 检查窗口是否最小化（坐标为负）
+        is_minimized = win_rect[0] < 0 or win_rect[1] < 0
+
+        # 对于最小化的窗口，使用窗口的实际大小
+        # GetWindowRect 返回的宽度/高度是正确的
+        if is_minimized or width < 0 or height < 0:
+            # 使用窗口矩形计算大小
+            width = win_rect[2] - win_rect[0]
+            height = win_rect[3] - win_rect[1]
+            # 取绝对值
+            width = abs(width)
+            height = abs(height)
+            # 对于最小化的 Qt 窗口，通常是 598x640 左右
+            if width < 100 or height < 100:
+                width = 598
+                height = 640
+
+        # 如果窗口是最小化的，将其移到屏幕边缘可见位置（不触发激活）
+        # 这样 PrintWindow 可以正确截取窗口内容
+        moved_to_edge = False
+        saved_rect = None
+        if is_minimized:
+            logger.info(f"检测到窗口最小化，尝试恢复窗口进行截图")
+            try:
+                # 获取当前窗口位置（即使是最小化也能获取）
+                win_rect = win32gui.GetWindowRect(hwnd)
+                saved_rect = win_rect
+                logger.info(f"最小化窗口原始位置: {win_rect}")
+
+                # 获取屏幕大小
+                screen_w = user32.GetSystemMetrics(0)  # SM_CXSCREEN
+                screen_h = user32.GetSystemMetrics(1)  # SM_CYSCREEN
+                logger.info(f"屏幕大小: {screen_w}x{screen_h}")
+
+                # 先恢复窗口到正常状态
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                logger.info("窗口已恢复")
+                time.sleep(0.2)
+
+                # 将窗口移到屏幕右下角（不遮挡主屏幕）
+                new_x = max(0, screen_w - width)
+                new_y = max(0, screen_h - height)
+                logger.info(f"移动窗口到: ({new_x}, {new_y})")
+
+                win32gui.SetWindowPos(hwnd, 0, new_x, new_y, width, height, 0)
+                moved_to_edge = True
+                logger.info(f"窗口已移动到屏幕边缘，位置: ({new_x}, {new_y})")
+
+                # 等待窗口渲染
+                time.sleep(0.2)
+
+                # 验证窗口位置
+                new_rect = win32gui.GetWindowRect(hwnd)
+                logger.info(f"窗口当前位置: {new_rect}")
+
+            except Exception as e:
+                logger.info(f"移动窗口失败: {e}")
+                import traceback
+                traceback.print_exc()
+
+        if width <= 0 or height <= 0:
+            logger.debug(f"窗口大小无效: {width}x{height}")
+            return None
+
+        # 创建设备上下文
+        hwndDC = win32gui.GetDC(hwnd)
+        mfcDC = win32ui.CreateDCFromHandle(hwndDC)
+        saveDC = mfcDC.CreateCompatibleDC()
+
+        # 创建位图
+        saveBitMap = win32ui.CreateBitmap()
+        saveBitMap.CreateCompatibleBitmap(mfcDC, width, height)
+        saveDC.SelectObject(saveBitMap)
+
+        # 绘制窗口内容（使用ctypes调用PrintWindow）
+        # PrintWindow 可以在窗口最小化时捕获内容
+        user32.PrintWindow(hwnd, saveDC.GetSafeHdc(), 2)
+
+        # 转换为Pil图像
+        bmpinfo = saveBitMap.GetInfo()
+        bmpstr = saveBitMap.GetBitmapBits(True)
+        img = Image.frombytes('RGBA', (bmpinfo['bmWidth'], bmpinfo['bmHeight']), bmpstr, 'raw', 'BGRA')
+
+        # 保存到文件
+        temp_path = _get_screenshot_path()
+        img.save(temp_path, 'PNG')
+
+        logger.info(f"截图成功，尺寸: {width}x{height}")
+
+        # 清理
+        try:
+            win32gui.ReleaseDC(hwnd, hwndDC)
+        except Exception:
+            pass
+        try:
+            saveDC.DeleteDC()
+        except Exception:
+            pass
+        try:
+            mfcDC.DeleteDC()
+        except Exception:
+            pass
+
+        # 如果之前移动了窗口，将窗口移回原位
+        if moved_to_edge and saved_rect:
+            try:
+                # 使用 SetWindowPos 将窗口移回原位（最小化位置）
+                win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
+                logger.info("窗口已恢复最小化")
+            except Exception as e:
+                logger.info(f"恢复窗口最小化失败: {e}")
+
+        return (temp_path, width, height)
+
+    except Exception as e:
+        logger.debug(f"PrintWindow截图失败: {e}")
+        import traceback
+        traceback.print_exc()
+
+        # 确保即使发生异常也将窗口恢复最小化
+        if moved_to_edge:
+            try:
+                win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
+            except Exception:
+                pass
+
+        return None
+
+
+def _capture_window_dc(hwnd: int, left: int, top: int, right: int, bottom: int) -> Optional[str]:
+    """
+    使用Win32 API直接绘制窗口内容到图片（不被遮挡）
+
+    Args:
+        hwnd: 窗口句柄
+        left, top, right, bottom: 截取区域坐标
+
+    Returns:
+        截图保存的临时文件路径
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    try:
+        user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
+
+        # 获取窗口设备上下文
+        hwndDC = user32.GetDC(hwnd)
+        if not hwndDC:
+            return None
+
+        try:
+            width = right - left
+            height = bottom - top
+            if width <= 0 or height <= 0:
+                return None
+
+            # 创建内存设备上下文
+            mfcDC = gdi32.CreateCompatibleDC(hwndDC)
+            if not mfcDC:
+                return None
+
+            try:
+                # 创建位图
+                hBitmap = gdi32.CreateCompatibleBitmap(hwndDC, width, height)
+                if not hBitmap:
+                    return None
+
+                try:
+                    # 选择位图到内存DC
+                    gdi32.SelectObject(mfcDC, hBitmap)
+
+                    # 绘制窗口内容到内存DC
+                    result = user32.PrintWindow(hwnd, mfcDC, 2)  # 2 = PW_CLIENTONLY | PW_RENDERFULLCONTENT
+
+                    if result:
+                        # 移动绘制内容到正确位置
+                        gdi32.BitBlt(mfcDC, 0, 0, width, height, hwndDC, left, top, 0x00CC0020)  # SRCCOPY
+
+                        # 转换为PIL Image
+                        from PIL import Image
+                        bmpinfo = ctypes.create_string_buffer(40)
+                        bmi = ctypes.Structure.from_buffer(bmpinfo)
+                        bmi.bmiHeader.biSize = ctypes.sizeof(bmi.bmiHeader)
+                        bmi.bmiHeader.biWidth = width
+                        bmi.bmiHeader.biHeight = -height  # 负值表示从上到下
+                        bmi.bmiHeader.biPlanes = 1
+                        bmi.bmiHeader.biBitCount = 32
+                        bmi.bmiHeader.biCompression = 0  # BI_RGB
+
+                        # 获取位图数据
+                        bits = ctypes.create_string_buffer(width * height * 4)
+                        gdi32.GetDIBits(mfcDC, hBitmap, 0, height, bits, ctypes.byref(bmi), 0)
+
+                        # 创建PIL Image
+                        img = Image.frombytes('RGBA', (width, height), bits, 'raw', 'BGRA')
+
+                        # 保存到文件
+                        temp_path = _get_screenshot_path()
+                        img.save(temp_path, 'PNG')
+                        return temp_path
+                finally:
+                    gdi32.DeleteObject(hBitmap)
+            finally:
+                gdi32.DeleteDC(mfcDC)
+        finally:
+            user32.ReleaseDC(hwnd, hwndDC)
+
+    except Exception as e:
+        logger.debug(f"Win32截图失败: {e}")
+        return None
+
+
+def _get_main_window_hwnd() -> Optional[int]:
+    """获取微信主窗口句柄"""
+    try:
+        for hwnd, title, class_name in _find_wechat_windows():
+            if "微信" in title or "WeChat" in title:
+                return hwnd
+    except Exception:
+        pass
+    return None
+
+
+def _ocr_recognize_sender(image_path: str) -> Optional[str]:
+    """
+    使用PaddleOCR识别发送者昵称
+
+    Args:
+        image_path: 截图路径
+
+    Returns:
+        发送者昵称，失败返回None
+    """
+    try:
+        from ...utils.ocr_utils import recognize_sender
+        return recognize_sender(image_path)
+    except ImportError as e:
+        logger.debug(f"PaddleOCR未安装: {e}")
+        return None
+    except Exception as e:
+        logger.debug(f"OCR识别失败: {e}")
+        return None
+
+
+def _right_click_at_position(x: int, y: int):
+    """在屏幕坐标处右键单击。"""
+    win32api.SetCursorPos((x, y))
+    time.sleep(0.2)
+    win32api.mouse_event(win32con.MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
+    time.sleep(0.1)
+    win32api.mouse_event(win32con.MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
+
+
+def _close_popup():
+    """关闭弹出的菜单或其他弹窗（按 ESC）。"""
+    try:
+        win32api.keybd_event(win32con.VK_ESCAPE, 0, 0, 0)
+        time.sleep(0.1)
+        win32api.keybd_event(win32con.VK_ESCAPE, 0, win32con.KEYEVENTF_KEYUP, 0)
+        time.sleep(0.3)
+    except Exception as e:
+        logger.debug(f"关闭弹窗失败: {e}")
+
 WECHAT_EXE_NAMES = {"wechat.exe", "weixin.exe"}
 MESSAGE_CLASSES = {
     "mmui::ChatTextItemView",
     "mmui::ChatBubbleItemView",
 }
 TIME_CLASS = "mmui::ChatItemView"
+
+
+def parse_message_name(raw_name: str) -> Tuple[Optional[str], str]:
+    """解析消息项的 Name 属性，提取发送者昵称和消息内容。
+
+    微信消息气泡的 Name 属性格式为：
+    - `[消息内容]`（普通消息，没有发送者信息）
+    - `[@被@的人] 消息内容`（当消息 @ 某人时，Name 只包含被 @ 的人，不是发送者！）
+
+    重要：由于微信 UI 限制，无法直接从 Name 属性获取发送者昵称。
+    当消息包含 @ 时，Name 格式为 "@被@的人 消息内容"，这里的 "被@的人" 不是发送者！
+
+    Args:
+        raw_name: 消息项的原始 Name 属性值
+
+    Returns:
+        Tuple[发送者昵称或None, 消息内容]
+        注意：由于 UI 限制，发送者昵称在大多数情况下返回 None
+    """
+    if not raw_name:
+        return None, ""
+
+    raw_name = raw_name.strip()
+    if not raw_name:
+        return None, ""
+
+    # 尝试匹配 [@被@的人] 消息内容 的格式
+    # 注意：这里的 "被@的人" 不是发送者！微信 UI 无法直接获取发送者信息
+    match = re.match(r'^@(\S+)\s+(.+)$', raw_name)
+    if match:
+        # 这里我们不返回 "被@的人" 作为 sender_name，因为那不是发送者
+        content = match.group(2)
+        return None, content  # 发送者昵称无法获取
+
+    # 如果不匹配上述格式，整个内容作为消息
+    return None, raw_name
 
 
 @dataclass(frozen=True)
@@ -49,9 +493,20 @@ class MessageEvent:
     group: str
     content: str
     timestamp: float
+    sender_name: Optional[str] = None
+    """消息发送者的显示昵称（从消息气泡的 Name 属性中提取）。"""
+
+    sender_wxid: Optional[str] = None
+    """消息发送者的微信ID（如果已通过 MemberRegistry 关联）。"""
+
     group_nickname: Optional[str] = None
+    """机器人在本群中的昵称（用于判断是否被 @）。"""
+
     is_at_me: bool = False
+    """是否 @ 了机器人。"""
+
     raw: object = None
+    """原始 UI 控件对象，包含完整的消息项信息。"""
 
 
 @dataclass(frozen=True)
@@ -60,6 +515,8 @@ class _VisibleItem:
     name: str
     class_name: str
     runtime_id: Tuple[int, ...]
+    sender_name: Optional[str] = None
+    """消息发送者昵称（仅当 kind="message" 时有值）。"""
     control: object = None
 
     @property
@@ -132,6 +589,261 @@ class OutgoingMessageRegistry:
         return False
 
 
+class MemberRegistry:
+    """群成员注册表，用于关联昵称和微信ID。
+
+    由于微信 UI 自动化无法直接获取消息发送者的微信ID，
+    本类提供手动注册和自动学习两种方式来建立昵称到微信ID的映射。
+
+    使用方式：
+    1. 手动注册：手动添加 {群名: {昵称: wxid}} 的映射
+    2. 自动学习：当监听到消息时，如果发送者在注册表中不存在，
+       会自动添加到待确认列表，供后续手动确认或关联
+
+    用法示例：
+        registry = MemberRegistry()
+
+        # 手动添加成员
+        registry.add_member("测试群", "张三", "wxid_xxx")
+
+        # 从文件加载成员
+        registry.load_from_file("members.json")
+
+        # 在监听器中使用
+        listener = WeChatGroupListener(
+            client, groups, on_message,
+            member_registry=registry
+        )
+    """
+
+    def __init__(self):
+        # {群名: {昵称: wxid}}
+        self._members: Dict[str, Dict[str, str]] = {}
+        # 缓存 {群名: {wxid: 昵称}}（反向索引）
+        self._members_by_wxid: Dict[str, Dict[str, str]] = {}
+        # 锁
+        self._lock = threading.Lock()
+
+    def add_member(self, group: str, name: str, wxid: str) -> None:
+        """添加群成员到注册表。
+
+        Args:
+            group: 群名称
+            name: 成员昵称
+            wxid: 成员的微信ID（可为空字符串，表示未获取到）
+        """
+        with self._lock:
+            if group not in self._members:
+                self._members[group] = {}
+                self._members_by_wxid[group] = {}
+            self._members[group][name] = wxid
+            # 只有非空微信ID才添加到反向索引
+            if wxid:
+                self._members_by_wxid[group][wxid] = name
+
+    def get_wxid(self, group: str, name: str) -> Optional[str]:
+        """根据群名和昵称获取微信ID。
+
+        Args:
+            group: 群名称
+            name: 成员昵称
+
+        Returns:
+            微信ID，如果不存在则返回 None
+        """
+        with self._lock:
+            return self._members.get(group, {}).get(name)
+
+    def get_name_by_wxid(self, group: str, wxid: str) -> Optional[str]:
+        """根据群名和微信ID获取昵称。
+
+        Args:
+            group: 群名称
+            wxid: 成员的微信ID
+
+        Returns:
+            昵称，如果不存在则返回 None
+        """
+        with self._lock:
+            return self._members_by_wxid.get(group, {}).get(wxid)
+
+    def load_from_dict(self, data: Dict[str, Dict[str, str]]) -> None:
+        """从字典加载成员数据。
+
+        格式: {群名: {昵称: wxid}}
+
+        Args:
+            data: 成员数据字典
+        """
+        with self._lock:
+            for group, members in data.items():
+                if group not in self._members:
+                    self._members[group] = {}
+                    self._members_by_wxid[group] = {}
+                for name, wxid in members.items():
+                    self._members[group][name] = wxid
+                    # 只有非空微信ID才添加到反向索引
+                    if wxid:
+                        self._members_by_wxid[group][wxid] = name
+
+    def load_from_file(self, filepath: str) -> bool:
+        """从 JSON 文件加载成员数据。
+
+        Args:
+            filepath: JSON 文件路径
+
+        Returns:
+            是否加载成功
+        """
+        import json
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            self.load_from_dict(data)
+            logger.info(f"从 {filepath} 加载了 {len(data)} 个群的成员信息")
+            return True
+        except Exception as e:
+            logger.warning(f"加载成员文件失败: {e}")
+            return False
+
+    def save_to_file(self, filepath: str) -> bool:
+        """保存成员数据到 JSON 文件。
+
+        Args:
+            filepath: JSON 文件路径
+
+        Returns:
+            是否保存成功
+        """
+        import json
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(self._members, f, ensure_ascii=False, indent=2)
+            logger.info(f"成员信息已保存到 {filepath}")
+            return True
+        except Exception as e:
+            logger.warning(f"保存成员文件失败: {e}")
+            return False
+
+    def to_dict(self) -> Dict[str, Dict[str, str]]:
+        """导出成员数据为字典。
+
+        Returns:
+            成员数据字典
+        """
+        with self._lock:
+            return {k: v.copy() for k, v in self._members.items()}
+
+    def fuzzy_match_member(self, group: str, nickname: str, threshold: float = 0.6) -> Optional[Tuple[str, str]]:
+        """
+        使用相似度匹配查找群成员。
+
+        当 OCR 识别的昵称可能不完整或有误差时，使用模糊匹配
+        找到最相似的已注册成员。
+
+        Args:
+            group: 群名称
+            nickname: OCR 识别到的昵称（可能不完整）
+            threshold: 相似度阈值（0-1），默认 0.6
+
+        Returns:
+            Tuple[匹配的昵称, 微信ID]，如果未找到返回 None
+        """
+        if not nickname:
+            return None
+
+        with self._lock:
+            group_members = self._members.get(group, {})
+            if not group_members:
+                return None
+
+        best_match = None
+        best_score = 0.0
+
+        for member_name, wxid in group_members.items():
+            # 计算相似度
+            score = self._similarity(nickname, member_name)
+            if score > best_score and score >= threshold:
+                best_score = score
+                best_match = (member_name, wxid)
+
+        if best_match:
+            logger.debug(f"模糊匹配: '{nickname}' -> '{best_match[0]}' (相似度: {best_score:.2f})")
+
+        return best_match
+
+    def _similarity(self, s1: str, s2: str) -> float:
+        """
+        计算两个字符串的相似度。
+
+        使用多种方法综合计算：
+        1. 包含关系：如果一个字符串包含另一个，提高分数
+        2. 编辑距离：计算 Levenshtein 相似度
+        3. 首尾字符匹配：昵称通常首尾字符更重要
+        """
+        if not s1 or not s2:
+            return 0.0
+
+        s1 = s1.strip()
+        s2 = s2.strip()
+
+        if s1 == s2:
+            return 1.0
+
+        # 包含关系
+        if s1 in s2 or s2 in s1:
+            shorter_len = min(len(s1), len(s2))
+            longer_len = max(len(s1), len(s2))
+            contain_score = shorter_len / longer_len
+        else:
+            contain_score = 0.0
+
+        # Levenshtein 相似度
+        edit_sim = self._levenshtein_similarity(s1, s2)
+
+        # 首尾字符匹配
+        prefix_score = 0.0
+        if s1[0] == s2[0]:
+            prefix_score = 0.2
+        suffix_score = 0.0
+        if s1[-1] == s2[-1]:
+            suffix_score = 0.2
+
+        # 综合评分
+        final_score = max(contain_score, edit_sim) + prefix_score + suffix_score
+        return min(final_score, 1.0)
+
+    def _levenshtein_similarity(self, s1: str, s2: str) -> float:
+        """计算 Levenshtein 相似度（0-1）"""
+        if not s1 or not s2:
+            return 0.0
+
+        # 优化：限制长度差
+        if abs(len(s1) - len(s2)) > max(len(s1), len(s2)) * 0.5:
+            return 0.0
+
+        # 动态规划计算编辑距离
+        m, n = len(s1), len(s2)
+        if m < n:
+            s1, s2 = s2, s1
+            m, n = n, m
+
+        # 只保存两行
+        prev = list(range(n + 1))
+        for i in range(1, m + 1):
+            curr = [i] + [0] * n
+            for j in range(1, n + 1):
+                if s1[i - 1] == s2[j - 1]:
+                    curr[j] = prev[j - 1]
+                else:
+                    curr[j] = min(prev[j], curr[j - 1], prev[j - 1]) + 1
+            prev = curr
+
+        edit_distance = prev[n]
+        max_len = max(m, n)
+        return 1.0 - (edit_distance / max_len)
+
+
 def _normalize_message_text(content: str) -> str:
     """归一化消息文本，提升本库发送回流识别的稳定性。"""
     text = str(content or "")
@@ -197,7 +909,7 @@ def _get_process_image_name(pid: int) -> str:
         return ""
 
 
-def _find_wechat_windows() -> List[Tuple[int, str, str]]:
+def _find_wechat_windows(include_hidden: bool = True) -> List[Tuple[int, str, str]]:
     windows: List[Tuple[int, str, str]] = []
 
     def callback(hwnd: int, _lparam: int) -> bool:
@@ -209,8 +921,10 @@ def _find_wechat_windows() -> List[Tuple[int, str, str]]:
         except Exception:
             return True
 
-        if exe_name in WECHAT_EXE_NAMES and win32gui.IsWindowVisible(hwnd):
-            windows.append((hwnd, title, class_name))
+        if exe_name in WECHAT_EXE_NAMES:
+            # 检查可见性（可选，因为独立窗口可能被最小化）
+            if include_hidden or win32gui.IsWindowVisible(hwnd):
+                windows.append((hwnd, title, class_name))
         return True
 
     win32gui.EnumWindows(callback, 0)
@@ -218,11 +932,33 @@ def _find_wechat_windows() -> List[Tuple[int, str, str]]:
 
 
 def _find_window_by_title(title_keyword: str, exclude_hwnd: Optional[int] = None) -> Optional[int]:
+    """根据标题关键词查找微信窗口。
+    
+    独立聊天窗口的标题可能是:
+    - 纯群名: "家庭龙虾"
+    - 群名+未读数: "家庭龙虾 (3)"
+    - 其他格式
+    
+    注意：当独立窗口存在时，主窗口的标题也可能变成群名！
+    所以必须通过 exclude_hwnd 排除主窗口，而不是仅靠标题判断。
+    """
     for hwnd, title, _class_name in _find_wechat_windows():
-        if hwnd == exclude_hwnd:
+        # 排除主窗口（通过句柄，而不是标题）
+        if exclude_hwnd is not None and hwnd == exclude_hwnd:
             continue
-        if title_keyword in title:
+            
+        # 标题完全匹配
+        if title == title_keyword:
+            logger.debug(f"找到独立窗口: '{title}' (hwnd={hwnd})")
             return hwnd
+        # 标题包含群名（独立窗口格式如 "家庭龙虾 (3)"）
+        if title_keyword in title:
+            # 检查是否是独立窗口格式（群名 + 可选的后缀）
+            # 匹配 "群名" 或 "群名 (数字)" 格式
+            if re.match(rf'^{re.escape(title_keyword)}(\s*\(\d+\))?$', title):
+                logger.debug(f"模式匹配独立窗口: '{title}' (hwnd={hwnd})")
+                return hwnd
+    
     return None
 
 
@@ -267,14 +1003,18 @@ def _read_visible_items(msg_list) -> List[_VisibleItem]:
             continue
         if cls == TIME_CLASS:
             kind = "time/system"
+            sender_name = None
         elif cls in MESSAGE_CLASSES:
             kind = "message"
+            # 解析消息，提取发送者昵称
+            sender_name, _ = parse_message_name(name)
         else:
             continue
         items.append(
             _VisibleItem(
                 kind=kind,
                 name=name,
+                sender_name=sender_name,
                 class_name=cls,
                 runtime_id=_safe_runtime_id(child),
                 control=child,
@@ -369,6 +1109,7 @@ class WeChatGroupListener:
         ignore_client_sent: bool = True,
         reply_on_at: bool = False,
         group_nicknames: Optional[Dict[str, str]] = None,
+        member_registry: Optional[MemberRegistry] = None,
         outgoing_ttl: float = 60.0,
         tick: float = 0.1,
         batch_size: int = 8,
@@ -381,6 +1122,7 @@ class WeChatGroupListener:
         self.ignore_client_sent = ignore_client_sent
         self.reply_on_at = reply_on_at
         self.group_nicknames = dict(group_nicknames or {})
+        self.member_registry = member_registry
         self.tick = tick
         self.batch_size = batch_size
         self.tail_size = tail_size
@@ -434,11 +1176,21 @@ class WeChatGroupListener:
             if group in self.sessions:
                 continue
 
-            chat_already_open = False
-            if self.reply_on_at and not self.group_nicknames.get(group):
-                chat_already_open = self._read_group_nickname(group)
+            # 先检查独立窗口是否已经存在
+            main_hwnd = self.client.window.hwnd
+            existing_hwnd = _find_window_by_title(group, exclude_hwnd=main_hwnd)
 
-            hwnd = self._ensure_subwindow(group, chat_already_open=chat_already_open)
+            if existing_hwnd:
+                # 独立窗口已存在，直接使用
+                logger.info(f"独立窗口已存在: {group} (hwnd={existing_hwnd})")
+                hwnd = existing_hwnd
+            else:
+                # 需要打开群聊
+                chat_already_open = False
+                if self.reply_on_at and not self.group_nicknames.get(group):
+                    chat_already_open = self._read_group_nickname(group)
+                hwnd = self._ensure_subwindow(group, chat_already_open=chat_already_open)
+
             root = uia.ControlFromHandle(hwnd)
             msg_list = _find_message_list(root)
             if not msg_list:
@@ -451,6 +1203,22 @@ class WeChatGroupListener:
                 msg_list=msg_list,
                 seen={item.key for item in baseline},
             )
+
+            # 自动注册群成员（如果提供了 member_registry 且群成员未注册）
+            if self.member_registry:
+                self._register_group_members(group)
+
+            # 注册完成后，重新确保独立窗口存在（注册过程可能关闭了窗口）
+            if not _find_window_by_title(group, exclude_hwnd=self.client.window.hwnd):
+                logger.info(f"独立窗口已关闭，重新打开: {group}")
+                hwnd = self._ensure_subwindow(group, chat_already_open=False)
+                root = uia.ControlFromHandle(hwnd)
+                msg_list = _find_message_list(root)
+                if msg_list:
+                    # 更新 session 的窗口信息
+                    self.sessions[group].hwnd = hwnd
+                    self.sessions[group].root = root
+                    self.sessions[group].msg_list = msg_list
 
     def _read_group_nickname(self, group: str) -> bool:
         """读取群昵称。
@@ -471,12 +1239,95 @@ class WeChatGroupListener:
             logger.warning(f"未读取到群昵称，无法精确判断是否 @ 我: {group}")
         return True
 
+    def _register_group_members(self, group: str) -> int:
+        """
+        注册群成员到 MemberRegistry。
+
+        使用 get_all_members_wxid 一次性获取所有成员的昵称和微信ID。
+        效率高，不需要为每个成员单独打开群详情。
+
+        启动时会检查 group_members.json 中该群的成员数量是否与实际一致，
+        如果不一致则重新获取。
+
+        Args:
+            group: 群名称
+
+        Returns:
+            成功获取微信ID的成员数量
+        """
+        if not self.member_registry:
+            return 0
+
+        # 检查是否已有注册信息
+        existing = self.member_registry._members.get(group, {})
+        
+        if len(existing) > 0:
+            # 已有注册信息，需要验证成员数量是否一致
+            logger.info(f"群 '{group}' 已有 {len(existing)} 名成员注册，验证成员数量...")
+            
+            # 获取当前群的实际成员数量
+            actual_count = self.client.group_manager.get_group_member_count(group)
+            
+            if actual_count < 0:
+                logger.warning(f"无法获取群 '{group}' 的实际成员数量，使用已有注册信息")
+                return sum(1 for v in existing.values() if v)
+            
+            if actual_count != len(existing):
+                logger.info(f"群 '{group}' 成员数量不一致（注册: {len(existing)}，实际: {actual_count}），重新注册...")
+                # 清空该群的注册信息
+                self.member_registry._members[group] = {}
+                self.member_registry._members_by_wxid[group] = {}
+            else:
+                logger.info(f"群 '{group}' 成员数量一致（{actual_count} 人），跳过自动注册")
+                return sum(1 for v in existing.values() if v)
+
+        logger.info(f"开始注册群 '{group}' 的成员...")
+
+        try:
+            # 一次性获取所有成员的昵称和微信ID
+            members = self.client.group_manager.get_all_members_wxid(group)
+            if not members:
+                logger.warning(f"未获取到群 '{group}' 的成员列表")
+                return 0
+
+            logger.info(f"获取到 {len(members)} 名群成员，开始注册...")
+
+            # 注册所有成员（包括没有微信ID的）
+            success_count = 0
+            for member_name, wxid in members.items():
+                # 即使微信ID为空也注册昵称，方便后续 OCR 匹配
+                self.member_registry.add_member(group, member_name, wxid)
+                if wxid:
+                    success_count += 1
+
+            # 保存到文件
+            members_file = "group_members.json"
+            self.member_registry.save_to_file(members_file)
+            logger.info(f"已注册 {len(members)} 名成员到 {members_file}，其中 {success_count} 名获取到微信ID")
+
+            return success_count
+
+        except Exception as e:
+            logger.error(f"注册群成员失败: {e}")
+            return 0
+
     def _ensure_subwindow(self, group: str, chat_already_open: bool = False) -> int:
         main_hwnd = self.client.window.hwnd
+        main_title = win32gui.GetWindowText(main_hwnd) or ""
+        
+        # 特殊情况：如果主窗口的标题就是群名，说明主窗口本身就是独立窗口
+        # 这可能发生在：上次程序异常退出后，独立窗口被误识别为主窗口
+        if main_title == group or re.match(rf'^{re.escape(group)}(\s*\(\d+\))?$', main_title):
+            logger.debug(f"主窗口标题 '{main_title}' 匹配群名 '{group}'，直接使用")
+            return main_hwnd
+        
         hwnd = _find_window_by_title(group, exclude_hwnd=main_hwnd)
         if hwnd:
+            logger.debug(f"找到独立窗口: {group} (hwnd={hwnd})")
             return hwnd
 
+        logger.debug(f"未找到独立窗口 '{group}'，需要打开新窗口")
+        
         if not chat_already_open:
             if not self.client.chat_window.open_chat(group, target_type="group"):
                 raise RuntimeError(f"打开群聊失败: {group}")
@@ -545,12 +1396,52 @@ class WeChatGroupListener:
         self._update_next_scan(session, added)
 
     def _handle_message(self, session: _ListenSession, item: _VisibleItem) -> None:
+        # 解析消息内容（可能包含 @发送者 格式的前缀）
+        _, content = parse_message_name(item.name)
+
+        sender_wxid = None
+        sender_name = None
+        matched_by = None  # 记录匹配方式
+
+        # OCR识别发送者昵称（完全静默，无鼠标操作）
+        ocr_sender = self._ocr_recognize_sender(session, item, content)
+
+        if ocr_sender:
+            sender_name = ocr_sender
+
+            # 尝试精确匹配
+            if self.member_registry:
+                sender_wxid = self.member_registry.get_wxid(session.group, sender_name)
+                if sender_wxid:
+                    matched_by = "精确匹配"
+
+            # 如果精确匹配失败，尝试模糊匹配
+            if not sender_wxid and self.member_registry:
+                fuzzy_result = self.member_registry.fuzzy_match_member(session.group, sender_name)
+                if fuzzy_result:
+                    matched_name, matched_wxid = fuzzy_result
+                    # 更新为匹配到的昵称（可能更完整）
+                    sender_name = matched_name
+                    sender_wxid = matched_wxid
+                    matched_by = "模糊匹配"
+
+        # 打印结果
+        if sender_name:
+            if sender_wxid:
+                logger.info(f"[{session.group}] {sender_name} ({sender_wxid}): {content[:50]} [{matched_by or '精确匹配'}]")
+            else:
+                logger.info(f"[{session.group}] {sender_name} (微信ID未注册): {content[:50]}")
+        else:
+            logger.info(f"[{session.group}] [未知发送者]: {content[:50]}")
+
         event = MessageEvent(
             group=session.group,
-            content=item.name,
+            content=content,
+            sender_name=sender_name,
+            sender_wxid=sender_wxid,
             timestamp=time.time(),
             group_nickname=self.group_nicknames.get(session.group),
-            is_at_me=self._is_at_me(session.group, item.name),
+            is_at_me=self._is_at_me(session.group, content),
             raw=item.control,
         )
         try:
@@ -561,6 +1452,392 @@ class WeChatGroupListener:
 
         if self.auto_reply and reply and self._should_send_reply(event):
             self.enqueue_reply(session.group, str(reply))
+
+    def _get_sender_via_ui(self, session: _ListenSession, item: _VisibleItem) -> Optional[Tuple[str, Optional[str]]]:
+        """
+        通过点击消息气泡获取发送者信息（UI方式）
+
+        Returns:
+            Tuple[发送者昵称, 微信ID] 或 None
+        """
+        sender_name = None
+        sender_wxid = None
+
+        try:
+            rect = item.control.BoundingRectangle
+            if not rect:
+                return None
+
+            # 点击消息气泡
+            center_x = rect.left + 30
+            center_y = (rect.top + rect.bottom) // 2
+
+            _right_click_at_position(center_x, center_y)
+            time.sleep(1)
+
+            # 查找右键菜单
+            context_menu = None
+            for pattern in ['mmui::CPopupMenu', 'mmui::CMenu', 'mmui::PopupMenu']:
+                try:
+                    menu = session.root.WindowControl(ClassName=pattern)
+                    if menu.Exists(maxSearchSeconds=0.5):
+                        context_menu = menu
+                        break
+                except:
+                    pass
+
+            if not context_menu:
+                _close_popup()
+                return None
+
+            # 点击"查看个人资料"
+            for ctrl, depth in uia.WalkControl(context_menu, includeTop=False, maxDepth=5):
+                try:
+                    name = ctrl.Name or ""
+                    if "查看个人资料" in name or "查看资料" in name:
+                        ctrl.Click(simulateMove=False)
+                        time.sleep(1.5)
+                        break
+                except:
+                    pass
+
+            _close_popup()
+
+            # 查找资料卡
+            for pattern in ['mmui::ProfileUniquePop', 'mmui::ContactProfileView', 'mmui::ProfileCardView']:
+                try:
+                    ctrl = session.root.WindowControl(ClassName=pattern)
+                    if ctrl.Exists(maxSearchSeconds=0.5):
+                        sender_name = ctrl.Name
+                        if sender_name:
+                            sender_name = sender_name.strip()
+
+                        # 获取微信ID
+                        for child, _ in uia.WalkControl(ctrl, includeTop=False, maxDepth=10):
+                            if child.ClassName == 'mmui::ContactProfileTextView':
+                                wxid = child.Name or ""
+                                if wxid.startswith('wxid_'):
+                                    sender_wxid = wxid
+                                    break
+                        break
+                except:
+                    pass
+
+            _close_popup()
+
+            if sender_name:
+                return (sender_name, sender_wxid)
+
+        except Exception as e:
+            logger.debug(f"UI方式获取发送者失败: {e}")
+
+        return None
+
+    def _ocr_recognize_sender(self, session: _ListenSession, item: _VisibleItem, message_content: str = None) -> Optional[str]:
+        """
+        使用PaddleOCR识别消息发送者昵称（纯后台，无鼠标操作）
+
+        策略：
+        1. 使用PrintWindow截取整个窗口（支持最小化窗口）
+        2. 根据消息内容定位消息位置
+        3. 在消息上方查找发送者昵称
+
+        Args:
+            session: 监听会话
+            item: 消息项
+            message_content: 已知的消息内容（用于定位）
+
+        Returns:
+            发送者昵称，失败返回None
+        """
+        import win32gui
+        import datetime
+
+        # 调试截图保存目录
+        debug_dir = os.path.join(_SCREENSHOT_DIR, 'debug_ocr')
+        try:
+            os.makedirs(debug_dir, exist_ok=True)
+        except Exception:
+            debug_dir = _SCREENSHOT_DIR
+
+        # 临时截图路径列表，用于最后清理
+        temp_paths = []
+
+        try:
+            # 获取消息气泡的边界（屏幕坐标）
+            msg_rect = item.control.BoundingRectangle
+            if not msg_rect:
+                logger.debug("无法获取消息区域边界")
+                return None
+
+            target_hwnd = session.hwnd
+
+            # 获取窗口标题验证
+            title = win32gui.GetWindowText(target_hwnd)
+            class_name = win32gui.GetClassName(target_hwnd)
+            win_rect = win32gui.GetWindowRect(target_hwnd)
+            logger.debug(f"截图目标: HWND={target_hwnd}, 标题='{title}', 类名='{class_name}', 区域={win_rect}")
+
+            # 无论窗口是否最小化，都使用 PrintWindow 截取目标窗口
+            # 这样可以确保截取的是独立聊天窗口的内容，而不是屏幕上的其他内容
+            logger.debug("使用PrintWindow截取目标窗口")
+            capture_result = _capture_window_full(target_hwnd)
+            if not capture_result:
+                logger.debug("PrintWindow截图失败")
+                return None
+
+            full_path, full_w, full_h = capture_result
+            temp_paths.append(full_path)  # 记录临时文件
+            logger.debug(f"截图尺寸: {full_w}x{full_h}")
+
+            # 保存完整截图用于调试
+            from PIL import Image
+            full_img = Image.open(full_path)
+            timestamp = datetime.datetime.now().strftime('%H%M%S_%f')
+            full_debug_path = os.path.join(debug_dir, f'full_{timestamp}.png')
+            full_img.save(full_debug_path)
+
+            # 获取窗口在屏幕上的实际位置
+            # 注意：此时窗口已经被移动到了屏幕边缘
+            win_rect = win32gui.GetWindowRect(target_hwnd)
+            win_left, win_top = win_rect[0], win_rect[1]
+            logger.debug(f"窗口当前屏幕位置: ({win_left}, {win_top})")
+
+            # 调试：打印消息气泡坐标
+            logger.debug(f"消息气泡(屏幕坐标): ({msg_rect.left}, {msg_rect.top}) - ({msg_rect.right}, {msg_rect.bottom})")
+
+            # 将屏幕坐标转换为截图内的相对坐标
+            rel_left = msg_rect.left - win_left
+            rel_top = msg_rect.top - win_top
+            rel_right = msg_rect.right - win_left
+            rel_bottom = msg_rect.bottom - win_top
+            logger.debug(f"消息气泡(截图相对坐标): ({rel_left}, {rel_top}) - ({rel_right}, {rel_bottom})")
+
+            # 新策略：根据消息内容定位发送者昵称
+            # 1. 对完整截图进行 OCR
+            # 2. 找到消息内容的位置
+            # 3. 在消息内容上方查找昵称
+            from src.utils.ocr_utils import recognize_text
+            texts = recognize_text(full_debug_path)
+            logger.debug(f"完整截图OCR识别到 {len(texts)} 个文本块")
+
+            # 打印所有OCR结果用于调试
+            logger.debug("=== OCR原始识别结果 ===")
+            for i, (text, confidence, bbox) in enumerate(texts):
+                logger.debug(f"  [{i}] text='{text}', conf={confidence:.2f}")
+
+            # 已知的消息内容
+            # message_content 是传入的参数
+
+            # 查找消息内容的位置
+            # 当有多个相同内容的消息时，选择Y坐标最大（最下方/最新）的那个
+            msg_bbox = None
+            msg_candidates = []
+            for text, confidence, bbox in texts:
+                if message_content and message_content in text:
+                    msg_candidates.append((text, confidence, bbox))
+                    logger.debug(f"找到消息内容候选 '{text}' 位置: {bbox}")
+                # 也尝试反向匹配（OCR结果在消息内容中）
+                elif message_content and text in message_content:
+                    msg_candidates.append((text, confidence, bbox))
+                    logger.debug(f"找到消息内容候选 '{text}' (部分匹配) 位置: {bbox}")
+
+            # 选择Y坐标最大的（最下方的消息，即最新消息）
+            if msg_candidates:
+                # bbox 格式: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+                # 取最大的 Y 坐标（最下方）
+                msg_candidates.sort(key=lambda x: max(x[2][0][1], x[2][2][1]), reverse=True)
+                msg_text, _, msg_bbox = msg_candidates[0]
+                logger.debug(f"选择最下方的消息: '{msg_text}' 位置: {msg_bbox}")
+
+            # 如果找到了消息内容，在上方查找昵称
+            sender = None
+            if msg_bbox:
+                # 消息气泡的坐标
+                msg_top_y = msg_bbox[0][1]  # 左上角的 Y 坐标
+                msg_left_x = msg_bbox[0][0]  # 左上角的 X 坐标
+                msg_right_x = msg_bbox[1][0]  # 右上角的 X 坐标
+                msg_center_x = (msg_left_x + msg_right_x) / 2
+
+                logger.debug(f"消息气泡位置: top_y={msg_top_y}, left_x={msg_left_x}, right_x={msg_right_x}, center_x={msg_center_x}")
+
+                # 判断是否是自己发送的消息
+                # 微信中自己发送的消息在右侧（消息中心点在截图右半部分）
+                if msg_center_x > full_w / 2:
+                    logger.debug(f"消息在右侧（center_x={msg_center_x} > {full_w/2}），识别为'自己'")
+                    return "自己"
+
+                logger.debug(f"消息气泡顶部 Y: {msg_top_y}, 左侧 X: {msg_left_x}")
+
+                # 昵称在消息气泡上方约 5-50 像素
+                # 查找在消息上方的文本
+                nickname_candidates = []
+                for text, confidence, bbox in texts:
+                    # 文本的底部 Y 坐标
+                    text_bottom_y = max(bbox[0][1], bbox[2][1])  # 左下或右下的 Y
+                    text_top_y = min(bbox[0][1], bbox[2][1])
+
+                    # 计算与消息的距离
+                    distance = msg_top_y - text_bottom_y
+
+                    # 调试：显示所有文本块的位置
+                    logger.debug(f"文本 '{text}' 底部Y={text_bottom_y}, 距离消息={distance}px")
+
+                    # 昵称应该在消息气泡正上方
+                    # 微信群聊中，昵称距离消息顶部约 5-50 像素
+                    # 上一条消息与本条消息之间的间距通常大于 60 像素
+                    if text_bottom_y < msg_top_y and text_bottom_y > msg_top_y - 60:
+                        # 距离太近可能是消息内容的一部分
+                        if distance < 5:
+                            continue
+                        # 过滤非昵称文本
+                        import re
+                        # 排除时间格式
+                        if re.match(r'^\d{1,2}:\d{2}$', text):
+                            continue
+                        # 排除纯数字
+                        if text.replace(' ', '').isdigit():
+                            continue
+                        # 排除群名
+                        if re.search(r'[（(]\s*\d+\s*[）)]', text):
+                            continue
+                        # 排除通知类
+                        if '新消息' in text or '条新' in text:
+                            continue
+
+                        # 昵称长度通常是 1-12 个字符（排除长文本）
+                        if 1 <= len(text) <= 12:
+                            nickname_candidates.append((text, confidence, distance, bbox))
+                            logger.debug(f"昵称候选: '{text}', 距离消息: {distance}px")
+
+                # 按距离排序，选择最近的
+                if nickname_candidates:
+                    nickname_candidates.sort(key=lambda x: x[2])
+                    sender = nickname_candidates[0][0]
+                    logger.debug(f"找到发送者: {sender}")
+
+            # 如果在消息上方 60 像素内没找到昵称，可能是连续消息
+            # 尝试在更大的范围内查找最近的昵称
+            if not sender and msg_bbox:
+                logger.debug("在消息上方60像素内未找到昵称，尝试扩大搜索范围...")
+                all_nickname_candidates = []
+                for text, confidence, bbox in texts:
+                    text_bottom_y = max(bbox[0][1], bbox[2][1])
+                    distance = msg_top_y - text_bottom_y
+
+                    # 在消息上方任意位置查找昵称（最大 500 像素）
+                    if text_bottom_y < msg_top_y and text_bottom_y > msg_top_y - 500:
+                        if distance < 5:
+                            continue
+                        import re
+                        if re.match(r'^\d{1,2}:\d{2}$', text):
+                            continue
+                        if text.replace(' ', '').isdigit():
+                            continue
+                        if re.search(r'[（(]\s*\d+\s*[）)]', text):
+                            continue
+                        if '新消息' in text or '条新' in text:
+                            continue
+                        if 1 <= len(text) <= 12:
+                            all_nickname_candidates.append((text, confidence, distance, bbox))
+                            logger.debug(f"扩大搜索 - 昵称候选: '{text}', 距离: {distance}px")
+
+                if all_nickname_candidates:
+                    all_nickname_candidates.sort(key=lambda x: x[2])
+                    sender = all_nickname_candidates[0][0]
+                    logger.debug(f"扩大搜索找到发送者: {sender}")
+
+            if sender:
+                return sender
+
+            # 备选方案：根据消息气泡的相对坐标裁剪区域
+            # 计算昵称区域（相对坐标）
+            nick_top = max(0, rel_top - 80)
+            nick_bottom = rel_bottom
+            nick_left = 0
+            nick_right = min(full_w, rel_left + 200)
+
+            if nick_right <= nick_left or nick_bottom <= nick_top:
+                logger.debug("昵称区域无效")
+                return None
+
+            # 裁剪昵称区域
+            nick_img = full_img.crop((nick_left, nick_top, nick_right, nick_bottom))
+            nickname_debug_path = os.path.join(debug_dir, f'nickname_{timestamp}.png')
+            nick_img.save(nickname_debug_path)
+            logger.debug(f"=== 调试截图已保存 ===")
+            logger.debug(f"完整截图: {full_debug_path}")
+            logger.debug(f"昵称区域截图: {nickname_debug_path}")
+
+            # 只对裁剪后的昵称区域进行OCR识别
+            from src.utils.ocr_utils import recognize_text
+            texts = recognize_text(nickname_debug_path)
+
+            logger.debug(f"昵称区域OCR识别到 {len(texts)} 个文本块")
+            logger.debug("=== OCR原始识别结果 ===")
+            for i, (text, confidence, bbox) in enumerate(texts):
+                logger.debug(f"  [{i}] text='{text}', conf={confidence:.2f}, bbox={bbox}")
+
+                # 分析OCR结果，查找发送者昵称
+                # 微信群聊消息格式通常是：头像在左侧，昵称在头像右侧，消息在下方
+                # OCR结果可能是：
+                #   家庭龙虾(4)
+                #   Yeafel
+                #   22:26
+                #   Yeafel  Yeafel（消息内容）
+
+                sender_candidates = []
+                for text, confidence, bbox in texts:
+                    if confidence < 0.5:
+                        continue
+
+                    text = text.strip()
+                    if not text:
+                        continue
+
+                    # 排除常见非昵称内容
+                    # 排除时间格式（xx:xx）
+                    import re
+                    if re.match(r'^\d{1,2}:\d{2}$', text):
+                        continue
+                    # 排除日期格式
+                    if re.match(r'^\d{4}/\d{1,2}/\d{1,2}$', text):
+                        continue
+                    # 排除纯数字
+                    if text.replace(' ', '').isdigit():
+                        continue
+                    # 排除群名（包含括号和数字，如 "家庭龙虾（4）" 或 "群名(3)"）
+                    if re.search(r'[（(]\s*\d+\s*[）)]', text):
+                        continue
+                    # 排除通知类文字
+                    if '新消息' in text or '条新' in text or '条消息' in text:
+                        continue
+                    # 排除"发送"等按钮文字
+                    if text in ['发送', 'send', 'Send']:
+                        continue
+
+                    # 昵称通常是2-20个字符
+                    if 1 < len(text) <= 20:
+                        sender_candidates.append((text, confidence, bbox))
+
+                # 返回第一个候选昵称（通常是消息发送者）
+                if sender_candidates:
+                    sender = sender_candidates[0][0]
+                    logger.info(f"找到发送者候选: {sender}")
+                    return sender
+
+                logger.debug("未找到发送者")
+
+        except Exception as e:
+            logger.debug(f"OCR识别发送者异常: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+        finally:
+            # 清理临时截图文件
+            for path in temp_paths:
+                _delete_screenshot(path)
 
     def _is_at_me(self, group: str, content: str) -> bool:
         nickname = self.group_nicknames.get(group)

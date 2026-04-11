@@ -43,6 +43,11 @@ scripts/*.json
 scripts/*.txt
 scripts/*.xlsx
 
+# Member registry (may contain sensitive WeChat IDs)
+group_members.json
+*_members.json
+member_registry.json
+
 # Temporary files
 *.tmp
 *.bak
@@ -57,6 +62,26 @@ desktop.ini
 .DS_Store
 .AppleDouble
 .LSOverride
+
+# Debug and test scripts (not part of the package)
+debug_*.py
+/test_*.py
+test_*.ps1
+debug_*/
+*.png
+ocr_runner.cs
+ocr_simple.py
+compile_cs.ps1
+analyze_dll.py
+check_dependencies.py
+find_winkit.ps1
+
+# Audit logs (may contain sensitive data)
+*_audit.jsonl
+wx4py_send_audit.jsonl
+
+# UV lock file (optional)
+uv.lock
 
 CLAUDE.md
 AGENTS.md

@@ -7,7 +7,12 @@ from .forwarder import (
     ForwardTarget,
     GroupForwardRule,
 )
-from .listener import MessageEvent, WeChatGroupListener
+from .listener import (
+    MemberRegistry,
+    MessageEvent,
+    WeChatGroupListener,
+    parse_message_name,
+)
 from .processor import (
     AsyncCallbackHandler,
     CallbackHandler,
@@ -32,4 +37,6 @@ __all__ = [
     "ForwardPayload",
     "GroupForwardRule",
     "ForwardRuleHandler",
+    "MemberRegistry",
+    "parse_message_name",
 ]
