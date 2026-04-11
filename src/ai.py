@@ -19,7 +19,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Dict, List, Literal, Optional
 
-from .core.listener import MessageEvent
+from .features.messaging.listener import MessageEvent
 
 ApiFormat = Literal["completions", "responses", "anthropic"]
 

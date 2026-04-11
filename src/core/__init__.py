@@ -1,17 +1,17 @@
 # -*- coding: utf-8 -*-
-"""核心模块 - 窗口管理与 UIAutomation 封装"""
+"""Windows 平台与 UIAutomation 底层能力。"""
 
-from .window import WeChatWindow
-from .uia_wrapper import UIAWrapper
 from .exceptions import (
-    WeChatError,
-    WeChatNotFoundError,
-    WeChatNotConnectedError,
-    UIAError,
     ControlNotFoundError,
-    TargetNotFoundError,
     RegistryError,
+    TargetNotFoundError,
+    UIAError,
+    WeChatError,
+    WeChatNotConnectedError,
+    WeChatNotFoundError,
 )
+from .uia_wrapper import UIAWrapper
+from .window import WeChatWindow
 
 __all__ = [
     "WeChatWindow",

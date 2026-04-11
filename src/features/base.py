@@ -2,7 +2,7 @@
 """微信 UI 页面基类"""
 import time
 from ..config import OPERATION_INTERVAL
-from ..utils.win32 import minimize_window
+from ..core.win32 import minimize_window
 
 
 class BasePage:

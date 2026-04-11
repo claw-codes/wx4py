@@ -181,6 +181,11 @@ class ChatWindow(BasePage):
 
     def _send_ctrl_hotkey(self, key_code: int) -> None:
         """通过 Win32 按一次 Ctrl+<key>，用于更稳定的文本粘贴。"""
+        self._send_ctrl_hotkey_static(key_code)
+
+    @staticmethod
+    def _send_ctrl_hotkey_static(key_code: int) -> None:
+        """通过 Win32 按一次 Ctrl+<key>，用于更稳定的文本粘贴。"""
         import win32api
         import win32con
 
@@ -191,6 +196,90 @@ class ChatWindow(BasePage):
         win32api.keybd_event(key_code, 0, win32con.KEYEVENTF_KEYUP, 0)
         time.sleep(0.05)
         win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
+
+    @staticmethod
+    def prepare_input_for_paste(edit, *, logger_override=None):
+        """聚焦并清空指定输入框，为粘贴内容做准备。"""
+        active_logger = logger_override or logger
+        if not edit:
+            active_logger.error("未找到聊天输入框")
+            return None
+
+        try:
+            try:
+                edit.Click(simulateMove=False)
+            except Exception:
+                try:
+                    edit.SetFocus()
+                except Exception:
+                    pass
+
+            time.sleep(0.2)
+
+            try:
+                edit.SendKeys('{Ctrl}a')
+                time.sleep(0.1)
+                edit.SendKeys('{Delete}')
+                time.sleep(0.1)
+            except Exception as exc:
+                active_logger.debug(f"清空聊天输入框失败: {exc}")
+
+            return edit
+        except Exception as exc:
+            active_logger.error(f"准备聊天输入框失败: {exc}")
+            return None
+
+    @staticmethod
+    def paste_text_into_focused_input(
+        text: str,
+        *,
+        log_error: str = "写入消息到剪贴板失败",
+        logger_override=None,
+    ) -> bool:
+        """通过剪贴板将文本粘贴到当前已聚焦的输入框。"""
+        active_logger = logger_override or logger
+        if not set_text_to_clipboard(text):
+            active_logger.error(log_error)
+            return False
+
+        ChatWindow._send_ctrl_hotkey_static(VK_V)
+        time.sleep(OPERATION_INTERVAL)
+        return True
+
+    @staticmethod
+    def send_text_via_input(
+        edit,
+        text: str,
+        *,
+        clipboard_error: str = "写入消息到剪贴板失败",
+        send_error: str = "发送消息失败",
+        logger_override=None,
+    ) -> bool:
+        """在指定输入框中发送文本消息。"""
+        edit = ChatWindow.prepare_input_for_paste(edit, logger_override=logger_override)
+        if not edit:
+            return False
+
+        if not ChatWindow.paste_text_into_focused_input(
+            text,
+            log_error=clipboard_error,
+            logger_override=logger_override,
+        ):
+            return False
+
+        active_logger = logger_override or logger
+        try:
+            edit.SendKeys('{Enter}')
+        except Exception as exc:
+            active_logger.debug(f"SendKeys Enter 失败: {exc}")
+            try:
+                edit.SendKeys('{Ctrl}{Enter}')
+            except Exception as fallback_exc:
+                active_logger.error(f"{send_error}: {fallback_exc}")
+                return False
+
+        time.sleep(0.3)
+        return True
 
     def _rebuild_uia_session(self) -> bool:
         """重建 UIA 会话并恢复窗口焦点。"""
@@ -235,45 +324,11 @@ class ChatWindow(BasePage):
     def _prepare_chat_input_for_paste(self):
         """聚焦并清空聊天输入框，为粘贴内容做准备。"""
         chat_input = self._get_chat_input()
-        if not chat_input:
-            logger.error("未找到聊天输入框")
-            return None
-
-        try:
-            # Try to focus the input
-            try:
-                chat_input.Click(simulateMove=False)
-            except Exception:
-                try:
-                    chat_input.SetFocus()
-                except Exception:
-                    pass
-
-            time.sleep(0.2)
-
-            # Clear existing content
-            try:
-                chat_input.SendKeys('{Ctrl}a')
-                time.sleep(0.1)
-                chat_input.SendKeys('{Delete}')
-                time.sleep(0.1)
-            except Exception as e:
-                logger.debug(f"清空聊天输入框失败: {e}")
-
-            return chat_input
-        except Exception as e:
-            logger.error(f"准备聊天输入框失败: {e}")
-            return None
+        return self.prepare_input_for_paste(chat_input)
 
     def _paste_text_into_chat_input(self, text: str, log_error: str = "写入消息到剪贴板失败") -> bool:
         """通过剪贴板将文本粘贴到当前聚焦的聊天输入框。"""
-        if not set_text_to_clipboard(text):
-            logger.error(log_error)
-            return False
-
-        self._send_ctrl_hotkey(VK_V)
-        time.sleep(OPERATION_INTERVAL)
-        return True
+        return self.paste_text_into_focused_input(text, log_error=log_error)
 
     def _run_send_phase(
         self,
@@ -926,26 +981,9 @@ class ChatWindow(BasePage):
         """
         logger.info(f"发送消息: {message[:20]}...")
 
-        chat_input = self._prepare_chat_input_for_paste()
-        if not chat_input:
+        chat_input = self._get_chat_input()
+        if not self.send_text_via_input(chat_input, message):
             return False
-
-        if not self._paste_text_into_chat_input(message):
-            return False
-
-        # 尝试多种方式发送消息
-        try:
-            chat_input.SendKeys('{Enter}')
-        except Exception as e:
-            logger.debug(f"SendKeys Enter 失败: {e}")
-            try:
-                # 兜底：尝试 Ctrl+Enter
-                chat_input.SendKeys('{Ctrl}{Enter}')
-            except Exception as e2:
-                logger.error(f"发送消息失败: {e2}")
-                return False
-
-        time.sleep(0.3)
 
         logger.info("消息已发送")
         return True

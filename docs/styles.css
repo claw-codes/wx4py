@@ -780,6 +780,61 @@ blockquote {
   gap: 18px;
 }
 
+.docs-hero {
+  padding-bottom: 40px;
+}
+
+.docs-flow {
+  display: grid;
+  gap: 12px;
+}
+
+.docs-step {
+  padding: 14px 16px;
+  border: 1px solid rgba(132, 167, 208, 0.12);
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.018));
+}
+
+.docs-step strong {
+  display: block;
+  color: #eef6ff;
+}
+
+.docs-step p {
+  margin: 8px 0 0;
+  color: var(--muted);
+}
+
+.docs-card-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+  margin-top: 28px;
+}
+
+.docs-card-grid-wide {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.docs-card {
+  display: flex;
+  flex-direction: column;
+}
+
+.docs-tag {
+  margin: 0 0 12px;
+  color: #b7c7dd;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 0.78rem;
+}
+
+.docs-card-actions {
+  margin-top: auto;
+  padding-top: 18px;
+}
+
 .reveal {
   opacity: 0;
   transform: translateY(18px);
@@ -796,7 +851,9 @@ blockquote {
   .cta-panel,
   .feature-grid,
   .requirement-grid,
-  .solution-grid {
+  .solution-grid,
+  .docs-card-grid,
+  .docs-card-grid-wide {
     grid-template-columns: 1fr;
   }
 

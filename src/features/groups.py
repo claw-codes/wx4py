@@ -78,7 +78,7 @@ class GroupManager(BasePage):
 
     def _open_group_chat(self, group_name: str) -> bool:
         """打开群聊，使用统一的日志记录。"""
-        from .chat_window import ChatWindow
+        from .chat import ChatWindow
 
         chat_window = ChatWindow(self._window)
         if not chat_window.open_chat(group_name, target_type='group'):

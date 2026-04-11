@@ -4,11 +4,12 @@ wx4py 客户端
 
 wx4py 的主入口。
 """
-from .core.window import WeChatWindow
 from .core.exceptions import WeChatNotFoundError
-from .core.listener import WeChatGroupListener
-from .pages.chat_window import ChatWindow
-from .pages.group_manager import GroupManager
+from .core.window import WeChatWindow
+from .features.chat import ChatWindow
+from .features.groups import GroupManager
+from .features.messaging.listener import OutgoingMessageRegistry
+from .features.messaging.processor import MessageHandler, WeChatGroupProcessor
 from .utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -44,7 +45,8 @@ class WeChatClient:
         self._window = WeChatWindow()
         self._chat_window: ChatWindow = None
         self._group_manager: GroupManager = None
-        self._listeners = []
+        self._services = []
+        self._outgoing_registry = OutgoingMessageRegistry(120.0)
 
         if auto_connect:
             self.connect()
@@ -73,66 +75,53 @@ class WeChatClient:
 
     def disconnect(self) -> None:
         """断开微信连接"""
-        for listener in list(self._listeners):
-            listener.stop()
-        self._listeners.clear()
+        for service in list(self._services):
+            service.stop()
+        self._services.clear()
         self._window.disconnect()
         self._chat_window = None
         self._group_manager = None
         logger.info("已断开微信连接")
 
-    def listen_groups(
+    def process_groups(
         self,
         groups,
-        on_message,
+        handlers,
         *,
-        auto_reply: bool = True,
         ignore_client_sent: bool = True,
         block: bool = False,
         **options,
-    ) -> WeChatGroupListener:
-        """监听多个群聊，支持回调返回文本自动回复。
+    ) -> WeChatGroupProcessor:
+        """统一处理多个群聊消息。
 
         Args:
             groups: 群聊名称列表。
-            on_message: 消息回调，入参为 MessageEvent。返回非空字符串时自动回复。
-            auto_reply: 是否自动发送回调返回的文本。
+            handlers: 一个或多个 MessageHandler。
             ignore_client_sent: 是否忽略本库发送后回流的消息。
             block: 是否阻塞当前线程运行监听循环。
             **options: 传给监听器的调度参数，例如 tick、batch_size、tail_size、
                 reply_on_at、group_nicknames。
 
         Returns:
-            WeChatGroupListener: 监听器实例，可调用 stop() 停止。
+            WeChatGroupProcessor: 处理器实例，可调用 stop() 停止。
         """
         if not self.is_connected:
             self.connect()
 
-        listener = WeChatGroupListener(
+        if isinstance(handlers, MessageHandler):
+            normalized_handlers = [handlers]
+        else:
+            normalized_handlers = list(handlers)
+
+        processor = WeChatGroupProcessor(
             self,
             groups,
-            on_message,
-            auto_reply=auto_reply,
+            normalized_handlers,
             ignore_client_sent=ignore_client_sent,
             **options,
         )
-        self._listeners.append(listener)
-        return listener.start(block=block)
-
-    def auto_reply_groups(self, groups, reply_func, *, block: bool = False, **options) -> WeChatGroupListener:
-        """监听群聊并自动回复。
-
-        ``reply_func`` 接收 MessageEvent，返回要回复的字符串；返回 None 或空字符串
-        表示不回复。
-        """
-        return self.listen_groups(
-            groups,
-            reply_func,
-            auto_reply=True,
-            ignore_client_sent=True,
-            block=block,
-            **options,
-        )
+        self._services.append(processor)
+        return processor.start(block=block)
 
     @property
     def window(self) -> WeChatWindow:
@@ -157,6 +146,11 @@ class WeChatClient:
     def is_connected(self) -> bool:
         """检查是否已连接微信"""
         return self._window.is_connected
+
+    @property
+    def outgoing_registry(self) -> OutgoingMessageRegistry:
+        """获取客户端级共享的已发送消息注册表。"""
+        return self._outgoing_registry
 
     def __enter__(self):
         """上下文管理器入口"""

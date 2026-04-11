@@ -145,7 +145,7 @@ with WeChatClient() as wx:
 ### AI 群聊机器人自动回复
 
 ```python
-from wx4py import AIClient, AIConfig, AIResponder, WeChatClient
+from wx4py import AIClient, AIConfig, AIResponder, AsyncCallbackHandler, WeChatClient
 
 groups = ["测试龙虾1", "测试龙虾2", "测试龙虾3"]
 
@@ -160,11 +160,15 @@ ai = AIClient(
 )
 
 with WeChatClient(auto_connect=True) as wx:
-    wx.auto_reply_groups(
+    wx.process_groups(
         groups,
-        AIResponder(ai, context_size=8, reply_on_at=True),
+        [
+            AsyncCallbackHandler(
+                AIResponder(ai, context_size=8, reply_on_at=True),
+                auto_reply=True,
+            )
+        ],
         block=True,
-        reply_on_at=True,
     )
 ```
 
@@ -173,6 +177,38 @@ with WeChatClient(auto_connect=True) as wx:
 <p align="center">
   <img src="docs/images/group-ai-bot-demo.jpg" alt="wx4py AI 群聊机器人自动回复效果" width="360">
 </p>
+
+---
+
+### 监听群消息并转发给指定联系人或群
+
+```python
+from wx4py import ForwardRuleHandler, GroupForwardRule, WeChatClient
+
+rules = [
+    GroupForwardRule(
+        source_group="告警群",
+        targets=["值班同学"],
+        target_type="contact",
+        prefix_template="[告警群] ",
+    ),
+    GroupForwardRule(
+        source_group="项目群A",
+        targets=["项目群B"],
+        target_type="group",
+        prefix_template="[项目群A] ",
+    ),
+]
+
+with WeChatClient(auto_connect=True) as wx:
+    wx.process_groups(
+        ["告警群", "项目群A"],
+        [ForwardRuleHandler(rules)],
+        block=True,
+    )
+```
+
+**效果**：可以监听指定群聊的消息，并把新消息自动转发给指定联系人，或者同步转发到另一个群。适合做告警通知、值班转发、跨群消息同步。
 
 ---
 
@@ -188,8 +224,9 @@ with WeChatClient(auto_connect=True) as wx:
 | 设置群昵称 | `wx.group_manager.set_group_nickname("工作群", "我的新昵称")` |
 | 开启免打扰 | `wx.group_manager.set_do_not_disturb("工作群", enable=True)` |
 | 置顶聊天 | `wx.group_manager.set_pin_chat("重要群", enable=True)` |
-| 监听多个群聊 | `wx.listen_groups(["群1", "群2"], on_message, block=True)` |
-| @ 触发 AI 自动回复 | `wx.auto_reply_groups(["群1"], AIResponder(ai), reply_on_at=True, block=True)` |
+| 监听/处理多个群聊 | `wx.process_groups(["群1"], [handler], block=True)` |
+| 监听群消息并转发 | `wx.process_groups(["群1"], [ForwardRuleHandler(rules)], block=True)` |
+| @ 触发 AI 自动回复 | `wx.process_groups(["群1"], [AsyncCallbackHandler(AIResponder(ai, reply_on_at=True), auto_reply=True)], block=True)` |
 
 ---
 
@@ -246,6 +283,7 @@ with WeChatClient() as wx:
 运行后，你的微信会自动发送这条消息。
 
 如果你是开发者，想查看更多调用示例，请参考 [examples/](./examples/) 目录。
+如果你想系统查看完整接口说明，请参考 [docs/guide/API_GUIDE.md](./docs/guide/API_GUIDE.md)。
 
 如果你要提交 Issue，请尽量提供微信版本号、wx4py 版本号、详细复现步骤，并附上相关截图或日志，便于定位问题。
 
@@ -311,7 +349,7 @@ wx4py 模拟真实用户操作，不修改微信客户端。但仍建议：
 <details>
 <summary><b>Q: 只能使用 wx4py 内置的 AIClient 吗？</b></summary>
 
-不是。`auto_reply_groups()` 接收任意回调函数，只要返回字符串就会自动发送；你可以接入自己的 HTTP 客户端、公司内部模型或其他 AI SDK。
+不是。`process_groups()` 接收任意 handler；你可以使用 `AsyncCallbackHandler` 包装自己的 HTTP 客户端、公司内部模型或其他 AI SDK。
 
 </details>
 
@@ -328,7 +366,7 @@ wx4py 模拟真实用户操作，不修改微信客户端。但仍建议：
 
 ## 更新记录
 
-完整版本更新说明请查看 [CHANGELOG.md](./CHANGELOG.md)。
+完整版本更新说明请查看 [CHANGELOG.md](docs/guide/CHANGELOG.md)。
 
 ---
 
@@ -359,6 +397,14 @@ wx4py 模拟真实用户操作，不修改微信客户端。但仍建议：
 同时也感谢 [wxauto](https://github.com/cluic/wxauto) 项目提供的思路参考，为本项目的实现带来了帮助。
 
 也感谢 [yeafel666](https://github.com/yeafel666) 对窗口连接、搜索体验和最小化能力等改进所做的贡献。
+
+---
+
+<p align="center">
+  <a href="https://www.star-history.com/#claw-codes/wx4py&Date">
+    <img src="https://api.star-history.com/svg?repos=claw-codes/wx4py&type=Date" alt="Star History Chart">
+  </a>
+</p>
 
 ---
 

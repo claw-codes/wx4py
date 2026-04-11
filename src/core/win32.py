@@ -12,7 +12,7 @@ import win32process
 import winreg
 from typing import List, Literal, Optional, Tuple
 
-from ..core.exceptions import RegistryError
+from .exceptions import RegistryError
 
 
 def ensure_screen_reader_flag() -> bool:

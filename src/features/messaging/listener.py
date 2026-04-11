@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import queue
+import re
 import threading
 import time
 from collections import deque
@@ -27,9 +28,9 @@ import win32con
 import win32gui
 import win32process
 
-from . import uiautomation as uia
-from ..utils.clipboard_utils import set_text_to_clipboard
-from ..utils.logger import get_logger
+from ...core import uiautomation as uia
+from ..chat import ChatWindow
+from ...utils.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -39,7 +40,6 @@ MESSAGE_CLASSES = {
     "mmui::ChatBubbleItemView",
 }
 TIME_CLASS = "mmui::ChatItemView"
-VK_V = 0x56
 
 
 @dataclass(frozen=True)
@@ -87,6 +87,7 @@ class _OutgoingRecord:
     group: str
     content: str
     expires_at: float
+    remaining_hits: int
 
 
 @dataclass(frozen=True)
@@ -102,29 +103,56 @@ class OutgoingMessageRegistry:
         self.ttl_seconds = ttl_seconds
         self._records: Deque[_OutgoingRecord] = deque()
 
-    def record(self, group: str, content: str) -> None:
-        content = (content or "").strip()
+    def record(self, group: str, content: str, max_hits: int = 8) -> None:
+        content = _normalize_message_text(content)
         if not content:
             return
-        self._records.append(
-            _OutgoingRecord(
-                group=group,
-                content=content,
-                expires_at=time.time() + self.ttl_seconds,
-            )
+        record = _OutgoingRecord(
+            group=group,
+            content=content,
+            expires_at=time.time() + self.ttl_seconds,
+            remaining_hits=max_hits,
         )
+        self._records.append(record)
 
     def should_ignore(self, group: str, content: str) -> bool:
         now = time.time()
-        content = (content or "").strip()
+        content = _normalize_message_text(content)
         while self._records and self._records[0].expires_at < now:
             self._records.popleft()
 
         for index, record in enumerate(self._records):
-            if record.group == group and record.content == content:
-                del self._records[index]
+            if record.group != group:
+                continue
+            if _is_same_outgoing_message(record.content, content):
+                record.remaining_hits -= 1
+                if record.remaining_hits <= 0:
+                    del self._records[index]
                 return True
         return False
+
+
+def _normalize_message_text(content: str) -> str:
+    """归一化消息文本，提升本库发送回流识别的稳定性。"""
+    text = str(content or "")
+    text = text.replace("\u2005", " ").replace("\xa0", " ")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _is_same_outgoing_message(expected: str, actual: str) -> bool:
+    """判断回流消息是否可视为本库刚发送的同一条消息。"""
+    if not expected or not actual:
+        return False
+    if expected == actual:
+        return True
+
+    # 微信 UIA 在部分版本上会对长文本、多行文本做轻微归一化或裁剪，
+    # 这里允许“包含关系”命中，避免机器人自己的回复再次触发监听链路。
+    shorter, longer = sorted((expected, actual), key=len)
+    if len(shorter) < 12:
+        return False
+    return shorter in longer
 
 
 def _safe_text(control, attr: str) -> str:
@@ -328,18 +356,6 @@ def _double_click_control(control) -> bool:
         return True
     except Exception:
         return False
-
-
-def _send_ctrl_v() -> None:
-    win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
-    time.sleep(0.05)
-    win32api.keybd_event(VK_V, 0, 0, 0)
-    time.sleep(0.05)
-    win32api.keybd_event(VK_V, 0, win32con.KEYEVENTF_KEYUP, 0)
-    time.sleep(0.05)
-    win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
-
-
 class WeChatGroupListener:
     """微信群聊监听器。"""
 
@@ -368,7 +384,8 @@ class WeChatGroupListener:
         self.tick = tick
         self.batch_size = batch_size
         self.tail_size = tail_size
-        self.outgoing_registry = OutgoingMessageRegistry(outgoing_ttl)
+        shared_registry = getattr(self.client, "outgoing_registry", None)
+        self.outgoing_registry = shared_registry or OutgoingMessageRegistry(outgoing_ttl)
         self.sessions: Dict[str, _ListenSession] = {}
         self._reply_queue: "queue.Queue[_ReplyTask]" = queue.Queue()
         self._stop_event = threading.Event()
@@ -582,9 +599,11 @@ class WeChatGroupListener:
         if not session:
             raise ValueError(f"未监听群聊: {group}")
 
-        sent = self._send_in_subwindow(session, content)
-        if sent and self.ignore_client_sent:
+        if self.ignore_client_sent:
+            # 先登记，再发送，避免微信回流速度快于登记速度导致漏判。
             self.outgoing_registry.record(group, content)
+
+        sent = self._send_in_subwindow(session, content)
         return sent
 
     def enqueue_reply(self, group: str, content: str) -> None:
@@ -622,32 +641,13 @@ class WeChatGroupListener:
             logger.error(f"未找到聊天输入框: {session.group}")
             return False
 
-        try:
-            try:
-                edit.Click(simulateMove=False)
-            except Exception:
-                edit.SetFocus()
-            time.sleep(0.1)
-            edit.SendKeys("{Ctrl}a")
-            time.sleep(0.05)
-            edit.SendKeys("{Delete}")
-            time.sleep(0.05)
-        except Exception:
-            pass
-
-        if not set_text_to_clipboard(content):
-            logger.error("写入回复到剪贴板失败")
-            return False
-
-        try:
-            _send_ctrl_v()
-            time.sleep(0.1)
-            edit.SendKeys("{Enter}")
-            time.sleep(0.2)
-            return True
-        except Exception as exc:
-            logger.error(f"发送群聊回复失败: {session.group}: {exc}")
-            return False
+        return ChatWindow.send_text_via_input(
+            edit,
+            content,
+            clipboard_error="写入回复到剪贴板失败",
+            send_error=f"发送群聊回复失败: {session.group}",
+            logger_override=logger,
+        )
 
     @staticmethod
     def _find_chat_input(root):

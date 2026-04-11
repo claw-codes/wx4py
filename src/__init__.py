@@ -8,7 +8,22 @@ wx4py - Python 微信自动化工具
 from ._version import __version__
 from .ai import AIClient, AIConfig, AIResponder
 from .client import WeChatClient
-from .core.listener import MessageEvent, WeChatGroupListener
+from .features.messaging.forwarder import (
+    ForwardPayload,
+    ForwardRuleHandler,
+    ForwardTarget,
+    GroupForwardRule,
+)
+from .features.messaging.listener import MessageEvent, WeChatGroupListener
+from .features.messaging.processor import (
+    AsyncCallbackHandler,
+    CallbackHandler,
+    ForwardAction,
+    MessageAction,
+    MessageHandler,
+    ReplyAction,
+    WeChatGroupProcessor,
+)
 from .core.exceptions import (
     WeChatError,
     WeChatNotFoundError,
@@ -27,6 +42,17 @@ __all__ = [
     "AIResponder",
     "MessageEvent",
     "WeChatGroupListener",
+    "MessageAction",
+    "ReplyAction",
+    "ForwardAction",
+    "MessageHandler",
+    "CallbackHandler",
+    "AsyncCallbackHandler",
+    "WeChatGroupProcessor",
+    "ForwardTarget",
+    "ForwardPayload",
+    "GroupForwardRule",
+    "ForwardRuleHandler",
     "WeChatError",
     "WeChatNotFoundError",
     "WeChatNotConnectedError",

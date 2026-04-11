@@ -42,7 +42,7 @@ import win32con
 import win32gui
 import win32process
 
-from .logger import get_logger
+from ..utils.logger import get_logger
 
 logger = get_logger(__name__)
 
