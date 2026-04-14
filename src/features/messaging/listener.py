@@ -1217,13 +1217,13 @@ class WeChatGroupListener:
             logger.info("主窗口已恢复")
         
         # 统一读取群昵称（此时只有主窗口，不会有托盘恢复循环）
-        if self.reply_on_at:
-            logger.info("启动阶段统一读取群昵称...")
-            for group in self.groups:
-                if not self.group_nicknames.get(group):
-                    logger.info(f"读取群昵称: {group}")
-                    self._read_group_nickname(group)
-            logger.info(f"群昵称加载完成: {list(self.group_nicknames.keys())}")
+        # 始终加载群昵称，因为 is_at_me 属性在消息事件中会用到
+        logger.info("启动阶段统一读取群昵称...")
+        for group in self.groups:
+            if not self.group_nicknames.get(group):
+                logger.info(f"读取群昵称: {group}")
+                self._read_group_nickname(group)
+        logger.info(f"群昵称加载完成: {list(self.group_nicknames.keys())}")
 
         # 第一步：为所有群注册成员（此时主窗口可见，不会有托盘恢复循环）
         if self.member_registry:
@@ -2085,20 +2085,35 @@ class WeChatGroupListener:
 
     def _is_at_me(self, group: str, content: str) -> bool:
         nickname = self.group_nicknames.get(group)
+        
+        # 调试：打印 nickname 的实际值
+        logger.info(f"_is_at_me DEBUG: group={repr(group)}, nickname={repr(nickname)}")
+        logger.info(f"_is_at_me DEBUG: content={repr(content[:100] if content else content)}")
+        
         if not nickname:
             logger.warning(f"_is_at_me: 群 '{group}' 未加载群昵称，无法判断是否被@")
             return False
 
+        # 去除 nickname 两端的空白字符（防止意外空格）
+        nickname = nickname.strip()
+        
         # 归一化 content 中的特殊空格字符（微信在 @昵称 后可能使用 \u2005 等不可见空格）
-        normalized = content.replace("\u2005", " ").replace("\xa0", " ")
-        # 同时检查原始 content 和归一化后的 content
-        at_pattern = f"@{nickname}"
-        result = at_pattern in content or at_pattern in normalized
-        if not result:
-            logger.info(f"_is_at_me: 群 '{group}' 未匹配到 @{nickname}，content前80字符: '{content[:80]}'")
-        else:
-            logger.info(f"_is_at_me: 群 '{group}' 匹配到 @{nickname}")
-        return result
+        normalized = content.replace("\u2005", " ").replace("\xa0", " ").replace("\u200b", "")
+        
+        # 同时检查半角 @ 和全角 ＠
+        at_patterns = [f"@{nickname}", f"\uff20{nickname}"]
+        
+        for at_pattern in at_patterns:
+            if at_pattern in content or at_pattern in normalized:
+                logger.info(f"_is_at_me: 群 '{group}' 匹配成功: {at_pattern}")
+                return True
+        
+        
+        # 详细调试：打印 Unicode 编码
+        logger.info(f"_is_at_me: 群 '{group}' 未匹配到 @{nickname}")
+        logger.info(f"_is_at_me: 检查的模式: {at_patterns}")
+        logger.info(f"_is_at_me: content Unicode: {' '.join([f'U+{ord(c):04X}' for c in content[:20]])}")
+        return False
 
     def _should_send_reply(self, event: MessageEvent) -> bool:
         if not self.reply_on_at:
