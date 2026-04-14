@@ -146,10 +146,14 @@ def _wechat_window_score(hwnd: int, title: str, class_name: str, exe_path: str) 
     if exe_name == "wechatappex.exe":
         score -= 200
 
-    if class_name.startswith("Qt"):
+    # 关键修复：区分主窗口和独立窗口
+    # 主窗口标题通常为“微信”，独立窗口标题为群名/联系人名
+    if title == "微信" or title.startswith("微信"):
+        score += 200  # 主窗口最高优先级
+    elif class_name.startswith("Qt") and title and "微信" not in title:
+        score -= 50  # 独立窗口降低优先级
+    elif class_name.startswith("Qt"):
         score += 30
-    if "微信" in title:
-        score += 10
 
     if not win32gui.IsWindowVisible(hwnd):
         score -= 20

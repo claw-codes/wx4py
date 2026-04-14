@@ -48,7 +48,13 @@ def on_message(event):
 
 def main():
     """主函数"""
-    group_name = "家庭龙虾"  # 修改为你要监听的群名称
+    # 配置要监听的群聊列表（可以添加多个群）
+    group_names = [
+        "家庭龙虾",  # 修改为你要监听的群名称
+        "凡哥护卫队",  # 修改为你要监听的群名称
+        # "群聊2",
+        # "群聊3",
+    ]
 
     # 创建成员注册表
     registry = MemberRegistry()
@@ -57,13 +63,13 @@ def main():
     members_file = "group_members.json"
     if Path(members_file).exists():
         registry.load_from_file(members_file)
-        existing_count = len(registry._members.get(group_name, {}))
-        if existing_count > 0:
-            print(f"✓ 已从 {members_file} 加载 {existing_count} 名群成员")
+        total_members = sum(len(members) for members in registry._members.values())
+        if total_members > 0:
+            print(f"✓ 已从 {members_file} 加载 {total_members} 名群成员")
 
     # 创建客户端并启动监听
     with WeChatClient(auto_connect=True) as wx:
-        print(f"\n开始监听群聊: {group_name}")
+        print(f"\n开始监听群聊: {', '.join(group_names)}")
         print("=" * 60)
         print("说明:")
         print("  - 首次监听会自动注册群成员（需要一些时间）")
@@ -75,7 +81,7 @@ def main():
         # 创建监听器（会自动注册群成员）
         listener = WeChatGroupListener(
             client=wx,
-            groups=[group_name],
+            groups=group_names,  # 支持多个群
             on_message=on_message,
             member_registry=registry,
             auto_reply=True,  # 启用自动回复

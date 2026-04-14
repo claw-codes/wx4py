@@ -1173,6 +1173,49 @@ class WeChatGroupListener:
         closed_windows = self._close_all_independent_windows()
         logger.info(f"已关闭 {len(closed_windows)} 个独立窗口")
         
+        # 关键修复：关闭独立窗口后，确保主窗口可见
+        from src.core.win32 import find_wechat_window
+        from src.core.tray import restore_wechat_from_native_tray
+                
+        # 关闭所有独立窗口后，等待一下让微信自动恢复主窗口
+        time.sleep(1.0)
+                
+        main_hwnd = find_wechat_window()
+        main_class_name = win32gui.GetClassName(main_hwnd) if main_hwnd else ""
+        main_window_title = win32gui.GetWindowText(main_hwnd) if main_hwnd else ""
+        logger.info(f"find_wechat_window 返回: {main_hwnd}, ClassName={main_class_name}, 标题='{main_window_title}'")
+                
+        # 检查是否是真正的主窗口（标题为"微信"且 ClassName 是 Qt51514QWindowIcon）
+        is_main_window = main_hwnd and main_window_title == "微信" and main_class_name == "Qt51514QWindowIcon"
+                
+        if not is_main_window:
+            logger.info("当前窗口不是主窗口（可能是独立窗口），尝试通过托盘恢复主窗口...")
+            # 关闭当前的独立窗口
+            if main_hwnd:
+                logger.info(f"关闭独立窗口: {main_hwnd}")
+                win32gui.PostMessage(main_hwnd, win32con.WM_CLOSE, 0, 0)
+                time.sleep(1.0)
+                    
+            # 通过托盘恢复主窗口
+            if restore_wechat_from_native_tray():
+                time.sleep(2.5)
+                main_hwnd = find_wechat_window()
+                main_class_name = win32gui.GetClassName(main_hwnd) if main_hwnd else ""
+                main_window_title = win32gui.GetWindowText(main_hwnd) if main_hwnd else ""
+                logger.info(f"托盘恢复后: {main_hwnd}, ClassName={main_class_name}, 标题='{main_window_title}'")
+        
+        if main_hwnd and main_hwnd != self.client.window.hwnd:
+            logger.info(f"主窗口句柄已更新: {self.client.window.hwnd} -> {main_hwnd}")
+            self.client.window._hwnd = main_hwnd
+        
+        if not win32gui.IsWindowVisible(main_hwnd):
+            logger.info("主窗口不可见，恢复主窗口")
+            # 使用 activate() 恢复主窗口（比 ShowWindow 更可靠）
+            self.client.window.activate()
+            # 关键修复：等待 UIA 树完全加载
+            time.sleep(2.5)
+            logger.info("主窗口已恢复")
+        
         # 统一读取群昵称（此时只有主窗口，不会有托盘恢复循环）
         if self.reply_on_at:
             logger.info("启动阶段统一读取群昵称...")
@@ -1182,31 +1225,45 @@ class WeChatGroupListener:
                     self._read_group_nickname(group)
             logger.info(f"群昵称加载完成: {list(self.group_nicknames.keys())}")
 
-        # 为每个群创建监听 session
-        for group in self.groups:
+        # 第一步：为所有群注册成员（此时主窗口可见，不会有托盘恢复循环）
+        if self.member_registry:
+            logger.info("启动阶段：统一注册所有群成员...")
+            for group in self.groups:
+                self._register_group_members(group)
+            logger.info("所有群成员注册完成")
+
+        # 第二步：批量打开独立窗口
+        # 策略：逐个打开独立窗口，_ensure_subwindow 会自动处理主窗口恢复
+        logger.info("启动阶段：批量打开独立窗口...")
+        all_sessions = {}
+
+        for i, group in enumerate(self.groups):
             if group in self.sessions:
                 continue
 
-            # 自动注册群成员（此时只有主窗口可见）
-            if self.member_registry:
-                self._register_group_members(group)
-
-            # 重新打开独立窗口用于监听
-            chat_already_open = group in self.group_nicknames
-            hwnd = self._ensure_subwindow(group, chat_already_open=chat_already_open)
-
+            logger.info(f"正在为群 '{group}' 打开独立窗口 ({i+1}/{len(self.groups)})...")
+            
+            # _ensure_subwindow 内部会自动确保主窗口可见再操作
+            hwnd = self._ensure_subwindow(group, chat_already_open=True)
+            
             root = uia.ControlFromHandle(hwnd)
             msg_list = _find_message_list(root)
             if not msg_list:
                 raise RuntimeError(f"未找到群聊消息列表: {group}")
             baseline = _read_visible_items(msg_list)
-            self.sessions[group] = _ListenSession(
+            
+            all_sessions[group] = _ListenSession(
                 group=group,
                 hwnd=hwnd,
                 root=root,
                 msg_list=msg_list,
                 seen={item.key for item in baseline},
             )
+            logger.info(f"已为群 '{group}' 创建监听 session (hwnd={hwnd})")
+
+        # 保存所有 session
+        self.sessions.update(all_sessions)
+        logger.info(f"所有独立窗口打开完成，共 {len(self.sessions)} 个监听 session")
 
     def _read_group_nickname(self, group: str) -> bool:
         """读取群昵称。
@@ -1455,13 +1512,19 @@ class WeChatGroupListener:
             logger.debug(f"主窗口标题 '{main_title}' 匹配群名 '{group}'，直接使用")
             return main_hwnd
         
+        # 先检查是否已有独立窗口
         hwnd = _find_window_by_title(group, exclude_hwnd=main_hwnd)
         if hwnd:
             logger.debug(f"找到独立窗口: {group} (hwnd={hwnd})")
             return hwnd
 
         logger.debug(f"未找到独立窗口 '{group}'，需要打开新窗口")
-        
+
+        # 关键：在操作主窗口前，确保主窗口可见
+        # 微信在有独立窗口可见时会自动隐藏主窗口
+        # 必须先最小化所有独立窗口，再恢复主窗口
+        self._ensure_main_window_visible()
+
         if not chat_already_open:
             if not self.client.chat_window.open_chat(group, target_type="group"):
                 raise RuntimeError(f"打开群聊失败: {group}")
