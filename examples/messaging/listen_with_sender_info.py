@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-群聊消息监听示例：获取发送者昵称和微信ID
+群聊消息监听示例：OCR 识别发送者昵称和微信ID
 
 本示例展示了如何使用 OCR + MemberRegistry 来识别消息发送者。
 
@@ -14,11 +14,13 @@
 - 逐个点击成员头像获取微信ID（需要成员公开微信ID）
 - 保存到 group_members.json 文件
 
-注意：
-- 微信 4.x 的 UI Automation 限制：消息气泡不暴露发送者信息
+前置要求：
+- 微信 4.x 的 UI Automation 不暴露发送者信息
 - 解决方案：使用 OCR 识别昵称 + MemberRegistry 关联微信ID
 - PaddleOCR 需要安装：pip install paddlepaddle paddleocr
 """
+
+from __future__ import annotations
 
 import sys
 from pathlib import Path
@@ -27,6 +29,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src import MemberRegistry, WeChatClient
 from src.features.messaging.listener import WeChatGroupListener
+
+
+# 配置要监听的群聊列表（可以添加多个群）
+GROUPS = [
+    "群名称1",  # 修改为你要监听的群名称
+    # "群名称2",
+    # "群名称3",
+]
 
 
 def on_message(event):
@@ -48,14 +58,6 @@ def on_message(event):
 
 def main():
     """主函数"""
-    # 配置要监听的群聊列表（可以添加多个群）
-    group_names = [
-        "家庭龙虾",  # 修改为你要监听的群名称
-        "凡哥护卫队",  # 修改为你要监听的群名称
-        # "群聊2",
-        # "群聊3",
-    ]
-
     # 创建成员注册表
     registry = MemberRegistry()
 
@@ -69,7 +71,7 @@ def main():
 
     # 创建客户端并启动监听
     with WeChatClient(auto_connect=True) as wx:
-        print(f"\n开始监听群聊: {', '.join(group_names)}")
+        print(f"\n开始监听群聊: {', '.join(GROUPS)}")
         print("=" * 60)
         print("说明:")
         print("  - 首次监听会自动注册群成员（需要一些时间）")
@@ -81,11 +83,13 @@ def main():
         # 创建监听器（会自动注册群成员）
         listener = WeChatGroupListener(
             client=wx,
-            groups=group_names,  # 支持多个群
+            groups=GROUPS,
             on_message=on_message,
             member_registry=registry,
-            auto_reply=True,  # 启用自动回复
-            reply_on_at=True,  # 启用@判断
+            auto_reply=False,  # 只监听，不自动回复
+            # 如果需要 AI 自动回复，可以设置：
+            # auto_reply=True,
+            # reply_on_at=True,  # 只在被 @ 时回复
         )
 
         # 开始监听

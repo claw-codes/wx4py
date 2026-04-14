@@ -180,6 +180,41 @@ with WeChatClient(auto_connect=True) as wx:
 
 ---
 
+### 群聊消息发送者识别（OCR）
+
+```python
+from wx4py import MemberRegistry, WeChatClient
+from wx4py.features.messaging.listener import WeChatGroupListener
+
+# 创建成员注册表（首次会自动注册群成员）
+registry = MemberRegistry()
+registry.load_from_file("group_members.json")
+
+def on_message(event):
+    if event.sender_name:
+        if event.sender_wxid:
+            print(f"[{event.group}] {event.sender_name} ({event.sender_wxid}): {event.content}")
+        else:
+            print(f"[{event.group}] {event.sender_name}: {event.content}")
+    else:
+        print(f"[{event.group}] 未知发送者: {event.content}")
+
+with WeChatClient(auto_connect=True) as wx:
+    listener = WeChatGroupListener(
+        client=wx,
+        groups=["工作群", "项目群"],
+        member_registry=registry,
+        on_message=on_message,
+    )
+    listener.start(block=True)
+```
+
+**效果**：群聊消息可以识别发送者昵称和微信ID，支持接入 AI 做更智能的回复。
+
+**原理**：通过 OCR 截图识别消息上方的昵称，结合 MemberRegistry 昵称匹配获取微信ID。
+
+---
+
 ### 监听群消息并转发给指定联系人或群
 
 ```python
@@ -325,7 +360,36 @@ AI 会自动完成操作。
 <details>
 <summary><b>Q: 聊天记录能获取发送者吗？</b></summary>
 
-微信 4.x 的 UI 不暴露发送者信息，这是技术限制，暂无法获取。
+微信 4.x 的 UI Automation 不直接暴露发送者信息，但 wx4py 通过 **OCR 截图识别 + MemberRegistry 昵称匹配** 的方式，可以识别群聊消息的发送者昵称和微信ID。
+
+**实现原理**：
+1. 使用 PaddleOCR 对消息区域截图识别昵称
+2. 通过 MemberRegistry 精确匹配或模糊匹配获取微信ID
+3. 自动注册群成员，建立昵称与微信ID的映射
+
+**使用示例**：
+```python
+from wx4py import MemberRegistry, WeChatClient
+from wx4py.features.messaging.listener import WeChatGroupListener
+
+# 创建成员注册表
+registry = MemberRegistry()
+registry.load_from_file("group_members.json")
+
+with WeChatClient(auto_connect=True) as wx:
+    listener = WeChatGroupListener(
+        client=wx,
+        groups=["工作群"],
+        member_registry=registry,  # 启用发送者识别
+        on_message=lambda e: print(f"{e.sender_name}: {e.content}"),
+    )
+    listener.start(block=True)
+```
+
+**注意事项**：
+- 需要安装 PaddleOCR：`pip install paddlepaddle paddleocr`
+- 首次监听会自动注册群成员（需要一些时间）
+- 成员信息保存在 `group_members.json`
 
 </details>
 

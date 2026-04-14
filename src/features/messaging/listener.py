@@ -1846,17 +1846,11 @@ class WeChatGroupListener:
             # message_content 是传入的参数
             logger.info(f"待匹配的消息内容: '{message_content}' (长度: {len(message_content) if message_content else 0})")
 
-            # 提前判断：如果消息气泡在右侧（自己发送的），直接返回"自己"
-            # 关键修复：使用 rel_right 判断，而不是中心点
-            # 因为 UIA 返回的可能是整个消息行容器，rel_left 总是很小
-            # 微信中自己发送的消息在右侧，气泡右侧靠近窗口右边（rel_right > 500）
-            # 别人的消息在左侧，气泡右侧通常 < 300
-            if rel_right > full_w * 0.8:  # 右侧 80% 区域
-                logger.info(f"消息在右侧（rel_right={rel_right} > {full_w*0.8:.0f}），识别为'自己'")
-                return "自己"
-
             # 查找消息内容的位置
-            # 当有多个相同内容的消息时，选择Y坐标最大（最下方/最新）的那个
+            # 当有多个相同内容的消息时，优先选择左侧的候选
+            # 原因：别人的消息在左侧（left_x 较小），自己发的消息在右侧
+            # UIA 不区分左右，所以可能匹配到自己发的同内容消息
+            # 优先选择左侧候选，可以确保找到正确的发送者昵称
             msg_bbox = None
             msg_candidates = []
             for text, confidence, bbox in texts:
@@ -1875,13 +1869,20 @@ class WeChatGroupListener:
                         msg_candidates.append((text, confidence, bbox))
                         logger.info(f"找到消息内容候选(归一化匹配) '{text}' 位置: {bbox}")
 
-            # 选择Y坐标最大的（最下方的消息，即最新消息）
             if msg_candidates:
-                # bbox 格式: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
-                # 取最大的 Y 坐标（最下方）
-                msg_candidates.sort(key=lambda x: max(x[2][0][1], x[2][2][1]), reverse=True)
-                msg_text, _, msg_bbox = msg_candidates[0]
-                logger.debug(f"选择最下方的消息: '{msg_text}' 位置: {msg_bbox}")
+                # 先按 Y 坐标排序，找到与 UIA 气泡 Y 范围最接近的候选
+                # UIA 气泡 Y 范围: rel_top ~ rel_bottom
+                uia_y_center = (rel_top + rel_bottom) / 2
+                # 按与 UIA Y 中心的距离排序，选最近的
+                msg_candidates.sort(key=lambda x: abs((max(x[2][0][1], x[2][2][1]) + min(x[2][0][1], x[2][2][1])) / 2 - uia_y_center))
+                # 在 Y 坐标最近的候选中，优先选择左侧的（left_x 较小的）
+                # 别人的消息在左侧，如果有同内容的别人消息，应该选左侧的
+                best_y_dist = abs((max(msg_candidates[0][2][0][1], msg_candidates[0][2][2][1]) + min(msg_candidates[0][2][0][1], msg_candidates[0][2][2][1])) / 2 - uia_y_center)
+                close_candidates = [c for c in msg_candidates if abs((max(c[2][0][1], c[2][2][1]) + min(c[2][0][1], c[2][2][1])) / 2 - uia_y_center) <= best_y_dist + 30]
+                # 在Y坐标接近的候选中，优先选择左侧的
+                close_candidates.sort(key=lambda x: x[2][0][0])  # 按 left_x 升序
+                msg_text, _, msg_bbox = close_candidates[0]
+                logger.info(f"选择消息候选: '{msg_text}' 位置: {msg_bbox} (共{len(msg_candidates)}个候选, {len(close_candidates)}个Y接近)")
 
             # 如果找到了消息内容，在上方查找昵称
             sender = None
@@ -1894,14 +1895,9 @@ class WeChatGroupListener:
 
                 logger.debug(f"消息气泡位置: top_y={msg_top_y}, left_x={msg_left_x}, right_x={msg_right_x}, center_x={msg_center_x}")
 
-                # 判断是否是自己发送的消息
-                # 关键修复：使用 OCR 识别到的消息内容 X 坐标，而不是 UIA 的气泡坐标
-                # UIA 的气泡坐标可能包含整个消息行（从最左到最右），不准确
-                # 微信中自己发送的消息在右侧（消息中心点在截图右半部分）
-                # 使用 >= 而不是 >，因为 299 == 299 也应该判定为右侧
-                if msg_center_x >= full_w / 2:
-                    logger.info(f"消息在右侧（center_x={msg_center_x} >= {full_w/2}），识别为'自己'")
-                    return "自己"
+                # 不在这里提前判断"自己"，而是先查找昵称
+                # 如果消息上方能找到昵称，说明是别人发的
+                # 如果找不到昵称，再根据左右位置判断是否是"自己"
 
                 logger.debug(f"消息气泡顶部 Y: {msg_top_y}, 左侧 X: {msg_left_x}")
 
@@ -1972,9 +1968,19 @@ class WeChatGroupListener:
             # 尝试在更大的范围内查找最近的昵称
             if not sender and msg_bbox:
                 logger.debug("在消息上方60像素内未找到昵称，尝试扩大搜索范围...")
+                
+                # 先判断消息的左右位置
+                msg_left_x = msg_bbox[0][0]  # 消息左边界
+                msg_right_x = msg_bbox[1][0]  # 消息右边界
+                msg_center_x = (msg_left_x + msg_right_x) / 2
+                # 使用消息中心位置判断左右：中心在右侧则是自己发的
+                msg_is_right = msg_center_x > full_w * 0.5
+                logger.info(f"消息位置: left_x={msg_left_x}, right_x={msg_right_x}, center_x={msg_center_x:.1f}, is_right={msg_is_right}")
+                
                 all_nickname_candidates = []
                 for text, confidence, bbox in texts:
                     text_bottom_y = max(bbox[0][1], bbox[2][1])
+                    text_left_x = bbox[0][0]  # 昵称左边界
                     distance = msg_top_y - text_bottom_y
 
                     # 在消息上方任意位置查找昵称（最大 500 像素）
@@ -2002,8 +2008,25 @@ class WeChatGroupListener:
                         if '@' in text or text.startswith('\uff20'):
                             continue
                         if 1 <= len(text) <= 12:
+                            # 关键检查：昵称水平位置是否与消息一致
+                            # 微信布局：别人的消息在左侧，昵称也在左侧（left_x 较小）
+                            #          自己的消息在右侧，上方没有昵称
+                            nick_is_left = text_left_x < full_w * 0.3
+                            
+                            if msg_is_right:
+                                # 消息在右侧（自己发的），如果昵称在左侧，说明是别人消息的昵称
+                                # 不应该匹配给自己
+                                if nick_is_left:
+                                    logger.debug(f"扩大搜索 - 跳过左侧昵称 '{text}' (left_x={text_left_x})，因为消息在右侧")
+                                    continue
+                            else:
+                                # 消息在左侧（别人发的），昵称也应该在左侧
+                                if not nick_is_left:
+                                    logger.debug(f"扩大搜索 - 跳过右侧昵称 '{text}' (left_x={text_left_x})，因为消息在左侧")
+                                    continue
+                            
                             all_nickname_candidates.append((text, confidence, distance, bbox))
-                            logger.debug(f"扩大搜索 - 昵称候选: '{text}', 距离: {distance}px")
+                            logger.debug(f"扩大搜索 - 昵称候选: '{text}', 距离: {distance}px, left_x: {text_left_x}")
 
                 if all_nickname_candidates:
                     all_nickname_candidates.sort(key=lambda x: x[2])
@@ -2011,112 +2034,32 @@ class WeChatGroupListener:
                     logger.info(f"扩大搜索找到发送者: {sender}")
                 else:
                     logger.info("扩大搜索(500px)未找到发送者昵称")
+                    # 如果消息在右侧且找不到昵称，说明是自己发的
+                    if msg_is_right:
+                        logger.info(f"消息在右侧且未找到昵称，识别为'自己'")
+                        return "自己"
 
             if sender:
                 return sender
 
-            # 备选方案：根据消息气泡的相对坐标裁剪区域
-            # 计算昵称区域（相对坐标）
-            # 关键：只裁剪消息上方的昵称区域，不包含消息气泡本身
-            # 昵称在消息上方约5-40像素，宽度通常不超过150像素
-            nick_top = max(0, rel_top - 50)
-            nick_bottom = rel_top  # 只到消息顶部，不包含消息内容
-            nick_left = max(0, rel_left - 10)  # 从消息左侧开始
-            nick_right = min(full_w, rel_left + 150)  # 昵称宽度通常不超过150像素
-
-            if nick_right <= nick_left or nick_bottom <= nick_top:
-                logger.debug("昵称区域无效")
+            # 所有昵称查找都失败，根据消息左右位置判断是否是自己发的
+            # 微信布局规则：自己消息在右侧，别人消息在左侧
+            # 只有在找不到昵称时才用位置判断
+            if msg_bbox:
+                msg_left_x = msg_bbox[0][0]  # 左上角的 X 坐标
+                msg_right_x = msg_bbox[1][0]  # 右上角的 X 坐标
+                msg_center_x = (msg_left_x + msg_right_x) / 2
+                msg_center_ratio = msg_center_x / full_w
+                if msg_center_x > full_w * 0.5:
+                    logger.info(f"未找到昵称，消息中心在右侧（center_x={msg_center_x:.1f}, ratio={msg_center_ratio:.2f} > 0.5），识别为'自己'")
+                    return "自己"
+                else:
+                    logger.info(f"未找到昵称，消息中心在左侧（center_x={msg_center_x:.1f}, ratio={msg_center_ratio:.2f}），无法识别发送者")
+                    return None
+            else:
+                # msg_bbox 为空，无法判断
+                logger.info("未找到消息内容位置，无法识别发送者")
                 return None
-
-            # 裁剪昵称区域
-            nick_img = full_img.crop((nick_left, nick_top, nick_right, nick_bottom))
-            nickname_debug_path = os.path.join(debug_dir, f'nickname_{timestamp}.png')
-            nick_img.save(nickname_debug_path)
-            logger.debug(f"=== 调试截图已保存 ===")
-            logger.debug(f"完整截图: {full_debug_path}")
-            logger.debug(f"昵称区域截图: {nickname_debug_path}")
-
-            # 只对裁剪后的昵称区域进行OCR识别
-            from src.utils.ocr_utils import recognize_text
-            texts = recognize_text(nickname_debug_path)
-
-            logger.debug(f"昵称区域OCR识别到 {len(texts)} 个文本块")
-            logger.debug("=== OCR原始识别结果 ===")
-            for i, (text, confidence, bbox) in enumerate(texts):
-                logger.debug(f"  [{i}] text='{text}', conf={confidence:.2f}, bbox={bbox}")
-
-                # 分析OCR结果，查找发送者昵称
-                # 微信群聊消息格式通常是：头像在左侧，昵称在头像右侧，消息在下方
-                # OCR结果可能是：
-                #   家庭龙虾(4)
-                #   Yeafel
-                #   22:26
-                #   Yeafel  Yeafel（消息内容）
-
-                sender_candidates = []
-                for text, confidence, bbox in texts:
-                    if confidence < 0.5:
-                        continue
-
-                    text = text.strip()
-                    if not text:
-                        continue
-
-                    # 排除常见非昵称内容
-                    # 排除时间格式（xx:xx）
-                    import re
-                    if re.match(r'^\d{1,2}:\d{2}$', text):
-                        continue
-                    # 排除日期格式
-                    if re.match(r'^\d{4}/\d{1,2}/\d{1,2}$', text):
-                        continue
-                    # 排除纯数字
-                    if text.replace(' ', '').isdigit():
-                        continue
-                    # 排除群名（包含括号和数字，如 "家庭龙虾（4）" 或 "群名(3)"）
-                    if re.search(r'[（(]\s*\d+\s*[）)]', text):
-                        continue
-                    # 排除通知类文字
-                    if '新消息' in text or '条新' in text or '条消息' in text:
-                        continue
-                    # 排除"发送"等按钮文字
-                    if text in ['发送', 'send', 'Send']:
-                        continue
-                    # 排除与消息内容相同或非常相似的文本
-                    # OCR可能把消息内容误识别（如"幺幺哒"→"么么哒"），不是昵称
-                    if message_content:
-                        # 长度相近的文本很可能是消息内容而非昵称
-                        if abs(len(text) - len(message_content)) <= 2 and len(text) >= 2:
-                            logger.debug(f"备选方案-排除与消息长度相近的文本: '{text}' (消息: '{message_content[:30]}')")
-                            continue
-                        # 字符重叠过滤（覆盖OCR误识别情况）
-                        if len(text) >= 3:
-                            overlap = sum(1 for c in text if c in message_content) / len(text)
-                            if overlap > 0.7 and len(text) >= 4:
-                                logger.debug(f"备选方案-排除与消息重叠: '{text}'")
-                                continue
-                    # 排除包含 @ 的文本（@ 提及内容，不是发送者昵称）
-                    # 昵称不会包含 @ 符号
-                    if '@' in text or text.startswith('\uff20'):
-                        continue
-
-                    # 昵称通常是2-10个字符（微信昵称一般不超过10个汉字/字符）
-                    if 1 < len(text) <= 10:
-                        sender_candidates.append((text, confidence, bbox))
-
-                if sender_candidates:
-                    # 优先返回在 member_registry 中已注册的昵称
-                    if self.member_registry:
-                        for text, confidence, bbox in sender_candidates:
-                            if self.member_registry.get_wxid(session.group, text):
-                                logger.info(f"备选方案-找到已注册的发送者: {text}")
-                                return text
-                    # 没有已注册的匹配，返回第一个候选
-                    sender = sender_candidates[0][0]
-                    logger.info(f"备选方案-找到发送者候选: {sender}")
-                    return sender
-
-                logger.info("备选方案-未找到发送者")
 
         except Exception as e:
             logger.debug(f"OCR识别发送者异常: {e}")
