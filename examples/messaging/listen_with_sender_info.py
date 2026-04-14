@@ -78,7 +78,8 @@ def main():
             groups=[group_name],
             on_message=on_message,
             member_registry=registry,
-            auto_reply=False,  # 只监听，不自动回复
+            auto_reply=True,  # 启用自动回复
+            reply_on_at=True,  # 启用@判断
         )
 
         # 开始监听

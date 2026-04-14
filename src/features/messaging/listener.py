@@ -281,11 +281,13 @@ def _capture_window_full(hwnd: int) -> Optional[Tuple[str, int, int]]:
             pass
 
         # 如果之前移动了窗口，将窗口移回原位
+        # 注意：不要在此处最小化窗口，因为调用方可能需要使用UIA获取控件坐标
+        # 调用方应在OCR完成后自行决定是否最小化窗口
         if moved_to_edge and saved_rect:
             try:
-                # 使用 SetWindowPos 将窗口移回原位（最小化位置）
-                win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
-                logger.info("窗口已恢复最小化")
+                # 不恢复最小化，保持窗口可见以便UIA获取正确坐标
+                # win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
+                logger.debug("窗口保持可见（不恢复最小化，以便UIA获取正确坐标）")
             except Exception as e:
                 logger.info(f"恢复窗口最小化失败: {e}")
 
@@ -296,12 +298,12 @@ def _capture_window_full(hwnd: int) -> Optional[Tuple[str, int, int]]:
         import traceback
         traceback.print_exc()
 
-        # 确保即使发生异常也将窗口恢复最小化
-        if moved_to_edge:
-            try:
-                win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
-            except Exception:
-                pass
+        # 注意：不在异常处理中最小化窗口
+        # if moved_to_edge:
+        #     try:
+        #         win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
+        #     except Exception:
+        #         pass
 
         return None
 
@@ -474,15 +476,8 @@ def parse_message_name(raw_name: str) -> Tuple[Optional[str], str]:
     if not raw_name:
         return None, ""
 
-    # 尝试匹配 [@被@的人] 消息内容 的格式
-    # 注意：这里的 "被@的人" 不是发送者！微信 UI 无法直接获取发送者信息
-    match = re.match(r'^@(\S+)\s+(.+)$', raw_name)
-    if match:
-        # 这里我们不返回 "被@的人" 作为 sender_name，因为那不是发送者
-        content = match.group(2)
-        return None, content  # 发送者昵称无法获取
-
-    # 如果不匹配上述格式，整个内容作为消息
+    # 保留原始消息内容（包含 @ 信息），以便 _is_at_me 能正确判断是否被 @
+    # 上游原始版本直接用 item.name 作为内容，这里保持一致
     return None, raw_name
 
 
@@ -1172,24 +1167,33 @@ class WeChatGroupListener:
             self.stop()
 
     def _open_sessions(self) -> None:
+        # 关键修复：启动阶段先关闭所有独立窗口，在主窗口上完成所有操作后再重新打开
+        # 避免独立窗口存在时操作主窗口触发托盘恢复循环
+        logger.info("启动阶段：关闭所有独立窗口...")
+        closed_windows = self._close_all_independent_windows()
+        logger.info(f"已关闭 {len(closed_windows)} 个独立窗口")
+        
+        # 统一读取群昵称（此时只有主窗口，不会有托盘恢复循环）
+        if self.reply_on_at:
+            logger.info("启动阶段统一读取群昵称...")
+            for group in self.groups:
+                if not self.group_nicknames.get(group):
+                    logger.info(f"读取群昵称: {group}")
+                    self._read_group_nickname(group)
+            logger.info(f"群昵称加载完成: {list(self.group_nicknames.keys())}")
+
+        # 为每个群创建监听 session
         for group in self.groups:
             if group in self.sessions:
                 continue
 
-            # 先检查独立窗口是否已经存在
-            main_hwnd = self.client.window.hwnd
-            existing_hwnd = _find_window_by_title(group, exclude_hwnd=main_hwnd)
+            # 自动注册群成员（此时只有主窗口可见）
+            if self.member_registry:
+                self._register_group_members(group)
 
-            if existing_hwnd:
-                # 独立窗口已存在，直接使用
-                logger.info(f"独立窗口已存在: {group} (hwnd={existing_hwnd})")
-                hwnd = existing_hwnd
-            else:
-                # 需要打开群聊
-                chat_already_open = False
-                if self.reply_on_at and not self.group_nicknames.get(group):
-                    chat_already_open = self._read_group_nickname(group)
-                hwnd = self._ensure_subwindow(group, chat_already_open=chat_already_open)
+            # 重新打开独立窗口用于监听
+            chat_already_open = group in self.group_nicknames
+            hwnd = self._ensure_subwindow(group, chat_already_open=chat_already_open)
 
             root = uia.ControlFromHandle(hwnd)
             msg_list = _find_message_list(root)
@@ -1204,22 +1208,6 @@ class WeChatGroupListener:
                 seen={item.key for item in baseline},
             )
 
-            # 自动注册群成员（如果提供了 member_registry 且群成员未注册）
-            if self.member_registry:
-                self._register_group_members(group)
-
-            # 注册完成后，重新确保独立窗口存在（注册过程可能关闭了窗口）
-            if not _find_window_by_title(group, exclude_hwnd=self.client.window.hwnd):
-                logger.info(f"独立窗口已关闭，重新打开: {group}")
-                hwnd = self._ensure_subwindow(group, chat_already_open=False)
-                root = uia.ControlFromHandle(hwnd)
-                msg_list = _find_message_list(root)
-                if msg_list:
-                    # 更新 session 的窗口信息
-                    self.sessions[group].hwnd = hwnd
-                    self.sessions[group].root = root
-                    self.sessions[group].msg_list = msg_list
-
     def _read_group_nickname(self, group: str) -> bool:
         """读取群昵称。
 
@@ -1227,6 +1215,9 @@ class WeChatGroupListener:
         返回 True 表示当前主窗口大概率已经停留在该群聊，可直接双击左侧会话项
         打开独立窗口，避免再次搜索同一个群。
         """
+        # 注意：_ensure_main_window_visible 已在 _open_sessions 开头统一调用
+        # 这里不再重复调用，避免反复最小化/恢复窗口
+
         try:
             nickname = self.client.group_manager.get_group_nickname(group)
         except Exception as exc:
@@ -1262,24 +1253,37 @@ class WeChatGroupListener:
         existing = self.member_registry._members.get(group, {})
         
         if len(existing) > 0:
-            # 已有注册信息，需要验证成员数量是否一致
-            logger.info(f"群 '{group}' 已有 {len(existing)} 名成员注册，验证成员数量...")
-            
-            # 获取当前群的实际成员数量
-            actual_count = self.client.group_manager.get_group_member_count(group)
-            
-            if actual_count < 0:
-                logger.warning(f"无法获取群 '{group}' 的实际成员数量，使用已有注册信息")
-                return sum(1 for v in existing.values() if v)
-            
-            if actual_count != len(existing):
-                logger.info(f"群 '{group}' 成员数量不一致（注册: {len(existing)}，实际: {actual_count}），重新注册...")
-                # 清空该群的注册信息
-                self.member_registry._members[group] = {}
-                self.member_registry._members_by_wxid[group] = {}
-            else:
-                logger.info(f"群 '{group}' 成员数量一致（{actual_count} 人），跳过自动注册")
-                return sum(1 for v in existing.values() if v)
+            # 已有注册信息，验证成员数量是否一致
+            try:
+                # 获取当前群的实际成员数量
+                actual_count = self.client.group_manager.get_group_member_count(group)
+                registered_count = len(existing)
+                
+                # 如果获取失败（返回负数或None），跳过验证
+                if not actual_count or actual_count < 0:
+                    logger.warning(
+                        f"群 '{group}' 获取成员数量失败（返回{actual_count}），跳过验证"
+                    )
+                    registered_with_wxid = sum(1 for v in existing.values() if v)
+                    return registered_with_wxid
+                
+                if actual_count != registered_count:
+                    logger.info(
+                        f"群 '{group}' 成员数量变化: 已注册 {registered_count} 名，实际 {actual_count} 名，重新注册..."
+                    )
+                    # 清空旧数据，重新注册
+                    self.member_registry._members[group] = {}
+                else:
+                    # 成员数量一致，跳过重新注册
+                    registered_with_wxid = sum(1 for v in existing.values() if v)
+                    logger.info(
+                        f"群 '{group}' 已有 {registered_count} 名成员注册（{registered_with_wxid} 名有微信ID），数量一致，跳过验证"
+                    )
+                    return registered_with_wxid
+            except Exception as e:
+                logger.warning(f"获取群成员数量失败，跳过验证: {e}")
+                registered_with_wxid = sum(1 for v in existing.values() if v)
+                return registered_with_wxid
 
         logger.info(f"开始注册群 '{group}' 的成员...")
 
@@ -1310,6 +1314,136 @@ class WeChatGroupListener:
         except Exception as e:
             logger.error(f"注册群成员失败: {e}")
             return 0
+    def _ensure_main_window_visible(self) -> None:
+        """确保微信主窗口可见，避免操作主窗口时反复触发托盘恢复逻辑。
+
+        当独立聊天窗口存在时，微信主窗口可能被隐藏或最小化，
+        后续操作主窗口（如注册群成员）会触发 _activate_hwnd 中的
+        托盘恢复逻辑，导致反复日志输出且无法成功恢复。
+
+        解决方案：先最小化所有独立聊天窗口，再恢复主窗口。
+        微信在有独立窗口可见时会自动隐藏主窗口，所以必须先最小化独立窗口。
+        操作完成后，_ensure_subwindow 会重新打开独立窗口。
+        """
+        try:
+            # 第1步：最小化所有独立窗口
+            self._minimize_independent_windows()
+            
+            # 第2步：重新查找主窗口（因为当前 self.client.window.hwnd 可能是独立窗口）
+            from src.core.win32 import find_wechat_window
+            main_hwnd = find_wechat_window()
+            if not main_hwnd:
+                logger.warning("未找到主窗口")
+                return
+            
+            # 如果主窗口句柄变化了，更新 client.window._hwnd
+            if main_hwnd != self.client.window._hwnd:
+                logger.info(f"主窗口句柄已更新: {self.client.window._hwnd} -> {main_hwnd}")
+                self.client.window._hwnd = main_hwnd
+            
+            # 第3步：确保主窗口可见
+            if not win32gui.IsWindowVisible(main_hwnd):
+                logger.info("主窗口不可见，尝试恢复（已最小化独立窗口）")
+                # 使用 activate() 恢复主窗口（比 ShowWindow 更可靠）
+                self.client.window._hwnd = main_hwnd
+                self.client.window.activate()
+                time.sleep(2.5)
+
+                if win32gui.IsWindowVisible(main_hwnd):
+                    logger.info("主窗口已恢复可见")
+                    # 关键修复：主窗口恢复后等待 UIA 树完全加载
+                    # 避免后续 open_chat 找不到搜索框
+                    time.sleep(2.0)
+                else:
+                    logger.warning("主窗口恢复失败")
+            else:
+                logger.debug("主窗口已可见，独立窗口已最小化")
+                # 即使主窗口可见，也等待一下确保 UIA 树稳定
+                time.sleep(1.0)
+        except Exception as e:
+            logger.debug(f"确保主窗口可见失败: {e}")
+
+    def _close_all_independent_windows(self) -> List[int]:
+        """关闭所有独立聊天窗口（除了主窗口）。
+        
+        Returns:
+            已关闭的窗口句柄列表
+        """
+        closed_hwnds = []
+        try:
+            main_hwnd = self.client.window.hwnd
+            
+            # 枚举所有微信窗口
+            for hwnd, title, class_name in _find_wechat_windows():
+                # 跳过主窗口
+                if hwnd == main_hwnd:
+                    continue
+                # 只关闭 Qt 窗口（独立聊天窗口）
+                if not class_name.startswith("Qt"):
+                    continue
+                # 跳过系统窗口（通过标题识别）
+                if title in ('Weixin', 'WxTrayIconMessageWindow', '微信', ''):
+                    continue
+                # 关闭窗口
+                logger.info(f"关闭独立窗口: '{title}' (hwnd={hwnd})")
+                win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+                closed_hwnds.append(hwnd)
+            
+            if closed_hwnds:
+                time.sleep(0.5)  # 等待窗口关闭完成
+        except Exception as e:
+            logger.debug(f"关闭独立窗口失败: {e}")
+        
+        return closed_hwnds
+
+    def _minimize_independent_windows(self, force_all: bool = False) -> None:
+        """最小化所有独立聊天窗口，使微信主窗口可以保持可见。
+
+        微信4.x的行为：当有独立聊天窗口可见时，主窗口会被自动隐藏。
+        在需要操作主窗口时，必须先最小化这些独立窗口。
+
+        Args:
+            force_all: 如果为 True，最小化所有标题可能为群名的窗口（不限于 self.groups）
+        """
+        try:
+            main_hwnd = self.client.window.hwnd
+            minimized = 0
+
+            # 1. 先最小化 self.sessions 中已注册的独立窗口
+            for group, session in self.sessions.items():
+                if session.hwnd and session.hwnd != main_hwnd:
+                    if win32gui.IsWindow(session.hwnd):
+                        logger.debug(f"最小化独立窗口: {group} (hwnd={session.hwnd})")
+                        win32gui.ShowWindow(session.hwnd, win32con.SW_MINIMIZE)
+                        minimized += 1
+
+            # 2. 通过 Win32 API 枚举所有微信窗口，找到残留的独立窗口
+            known_hwnds = {main_hwnd}
+            for session in self.sessions.values():
+                if session.hwnd:
+                    known_hwnds.add(session.hwnd)
+
+            for hwnd, title, class_name in _find_wechat_windows():
+                if hwnd in known_hwnds:
+                    continue
+                # 根据 force_all 参数决定是否检查群名
+                if force_all:
+                    # 最小化所有 Qt 窗口（可能是未知群名的独立窗口）
+                    if not class_name.startswith("Qt"):
+                        continue
+                else:
+                    # 只最小化标题匹配已知群名的窗口
+                    if title not in self.groups:
+                        continue
+                # 最小化独立聊天窗口
+                logger.info(f"最小化残留独立窗口: '{title}' (hwnd={hwnd})")
+                win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
+                minimized += 1
+
+            if minimized > 0:
+                time.sleep(0.3)
+        except Exception as e:
+            logger.debug(f"最小化独立窗口失败: {e}")
 
     def _ensure_subwindow(self, group: str, chat_already_open: bool = False) -> int:
         main_hwnd = self.client.window.hwnd
@@ -1572,6 +1706,14 @@ class WeChatGroupListener:
 
             target_hwnd = session.hwnd
 
+            # 保存窗口原始状态，用于判断是否需要在OCR完成后恢复最小化
+            try:
+                original_win_rect = win32gui.GetWindowRect(target_hwnd)
+                was_minimized = original_win_rect[0] < 0 or original_win_rect[1] < 0
+            except Exception:
+                original_win_rect = None
+                was_minimized = False
+
             # 获取窗口标题验证
             title = win32gui.GetWindowText(target_hwnd)
             class_name = win32gui.GetClassName(target_hwnd)
@@ -1598,20 +1740,31 @@ class WeChatGroupListener:
             full_img.save(full_debug_path)
 
             # 获取窗口在屏幕上的实际位置
-            # 注意：此时窗口已经被移动到了屏幕边缘
+            # 注意：_capture_window_full 可能移动了窗口，需要重新获取 msg_rect
+            # 否则用旧坐标 - 新坐标 = 错误的相对位置
             win_rect = win32gui.GetWindowRect(target_hwnd)
             win_left, win_top = win_rect[0], win_rect[1]
             logger.debug(f"窗口当前屏幕位置: ({win_left}, {win_top})")
 
-            # 调试：打印消息气泡坐标
-            logger.debug(f"消息气泡(屏幕坐标): ({msg_rect.left}, {msg_rect.top}) - ({msg_rect.right}, {msg_rect.bottom})")
+            # 重新获取消息气泡坐标（窗口移动后UIA坐标已更新）
+            try:
+                msg_rect = item.control.BoundingRectangle
+            except Exception:
+                logger.warning("窗口移动后无法重新获取消息气泡坐标")
+                return None
+
+            if not msg_rect:
+                logger.warning("窗口移动后消息气泡坐标为空")
+                return None
+
+            logger.info(f"消息气泡(屏幕坐标): ({msg_rect.left}, {msg_rect.top}) - ({msg_rect.right}, {msg_rect.bottom})")
 
             # 将屏幕坐标转换为截图内的相对坐标
             rel_left = msg_rect.left - win_left
             rel_top = msg_rect.top - win_top
             rel_right = msg_rect.right - win_left
             rel_bottom = msg_rect.bottom - win_top
-            logger.debug(f"消息气泡(截图相对坐标): ({rel_left}, {rel_top}) - ({rel_right}, {rel_bottom})")
+            logger.info(f"消息气泡(截图相对坐标): ({rel_left}, {rel_top}) - ({rel_right}, {rel_bottom})")
 
             # 新策略：根据消息内容定位发送者昵称
             # 1. 对完整截图进行 OCR
@@ -1619,15 +1772,25 @@ class WeChatGroupListener:
             # 3. 在消息内容上方查找昵称
             from src.utils.ocr_utils import recognize_text
             texts = recognize_text(full_debug_path)
-            logger.debug(f"完整截图OCR识别到 {len(texts)} 个文本块")
+            logger.info(f"完整截图OCR识别到 {len(texts)} 个文本块")
 
             # 打印所有OCR结果用于调试
-            logger.debug("=== OCR原始识别结果 ===")
+            logger.info("=== OCR原始识别结果 ===")
             for i, (text, confidence, bbox) in enumerate(texts):
-                logger.debug(f"  [{i}] text='{text}', conf={confidence:.2f}")
+                logger.info(f"  [{i}] text='{text}', conf={confidence:.2f}, bbox={bbox}")
 
             # 已知的消息内容
             # message_content 是传入的参数
+            logger.info(f"待匹配的消息内容: '{message_content}' (长度: {len(message_content) if message_content else 0})")
+
+            # 提前判断：如果消息气泡在右侧（自己发送的），直接返回"自己"
+            # 关键修复：使用 rel_right 判断，而不是中心点
+            # 因为 UIA 返回的可能是整个消息行容器，rel_left 总是很小
+            # 微信中自己发送的消息在右侧，气泡右侧靠近窗口右边（rel_right > 500）
+            # 别人的消息在左侧，气泡右侧通常 < 300
+            if rel_right > full_w * 0.8:  # 右侧 80% 区域
+                logger.info(f"消息在右侧（rel_right={rel_right} > {full_w*0.8:.0f}），识别为'自己'")
+                return "自己"
 
             # 查找消息内容的位置
             # 当有多个相同内容的消息时，选择Y坐标最大（最下方/最新）的那个
@@ -1636,11 +1799,18 @@ class WeChatGroupListener:
             for text, confidence, bbox in texts:
                 if message_content and message_content in text:
                     msg_candidates.append((text, confidence, bbox))
-                    logger.debug(f"找到消息内容候选 '{text}' 位置: {bbox}")
+                    logger.info(f"找到消息内容候选(完全匹配) '{text}' 位置: {bbox}")
                 # 也尝试反向匹配（OCR结果在消息内容中）
                 elif message_content and text in message_content:
                     msg_candidates.append((text, confidence, bbox))
-                    logger.debug(f"找到消息内容候选 '{text}' (部分匹配) 位置: {bbox}")
+                    logger.info(f"找到消息内容候选(部分匹配) '{text}' 位置: {bbox}")
+                # 尝试归一化空格后匹配
+                elif message_content:
+                    normalized_content = message_content.replace("\u2005", "").replace("\xa0", "").strip()
+                    normalized_text = text.replace("\u2005", "").replace("\xa0", "").strip()
+                    if normalized_content in normalized_text or normalized_text in normalized_content:
+                        msg_candidates.append((text, confidence, bbox))
+                        logger.info(f"找到消息内容候选(归一化匹配) '{text}' 位置: {bbox}")
 
             # 选择Y坐标最大的（最下方的消息，即最新消息）
             if msg_candidates:
@@ -1653,7 +1823,7 @@ class WeChatGroupListener:
             # 如果找到了消息内容，在上方查找昵称
             sender = None
             if msg_bbox:
-                # 消息气泡的坐标
+                # 消息气泡的坐标（OCR 识别到的消息内容位置）
                 msg_top_y = msg_bbox[0][1]  # 左上角的 Y 坐标
                 msg_left_x = msg_bbox[0][0]  # 左上角的 X 坐标
                 msg_right_x = msg_bbox[1][0]  # 右上角的 X 坐标
@@ -1662,9 +1832,12 @@ class WeChatGroupListener:
                 logger.debug(f"消息气泡位置: top_y={msg_top_y}, left_x={msg_left_x}, right_x={msg_right_x}, center_x={msg_center_x}")
 
                 # 判断是否是自己发送的消息
+                # 关键修复：使用 OCR 识别到的消息内容 X 坐标，而不是 UIA 的气泡坐标
+                # UIA 的气泡坐标可能包含整个消息行（从最左到最右），不准确
                 # 微信中自己发送的消息在右侧（消息中心点在截图右半部分）
-                if msg_center_x > full_w / 2:
-                    logger.debug(f"消息在右侧（center_x={msg_center_x} > {full_w/2}），识别为'自己'")
+                # 使用 >= 而不是 >，因为 299 == 299 也应该判定为右侧
+                if msg_center_x >= full_w / 2:
+                    logger.info(f"消息在右侧（center_x={msg_center_x} >= {full_w/2}），识别为'自己'")
                     return "自己"
 
                 logger.debug(f"消息气泡顶部 Y: {msg_top_y}, 左侧 X: {msg_left_x}")
@@ -1692,6 +1865,16 @@ class WeChatGroupListener:
                             continue
                         # 过滤非昵称文本
                         import re
+                        # 排除与消息内容相同或非常相似的文本（不是昵称）
+                        if message_content:
+                            # 长度相近的文本很可能是消息内容而非昵称
+                            if abs(len(text) - len(message_content)) <= 2 and len(text) >= 2:
+                                continue
+                            # 字符重叠过滤
+                            if len(text) >= 3:
+                                overlap = sum(1 for c in text if c in message_content) / len(text)
+                                if overlap > 0.7 and len(text) >= 4:
+                                    continue
                         # 排除时间格式
                         if re.match(r'^\d{1,2}:\d{2}$', text):
                             continue
@@ -1704,6 +1887,10 @@ class WeChatGroupListener:
                         # 排除通知类
                         if '新消息' in text or '条新' in text:
                             continue
+                        # 排除包含 @ 的文本（@ 提及内容，不是发送者昵称）
+                        # 昵称不会包含 @ 符号
+                        if '@' in text or text.startswith('\uff20'):
+                            continue
 
                         # 昵称长度通常是 1-12 个字符（排除长文本）
                         if 1 <= len(text) <= 12:
@@ -1714,7 +1901,9 @@ class WeChatGroupListener:
                 if nickname_candidates:
                     nickname_candidates.sort(key=lambda x: x[2])
                     sender = nickname_candidates[0][0]
-                    logger.debug(f"找到发送者: {sender}")
+                    logger.info(f"60px搜索找到发送者: {sender}")
+                else:
+                    logger.info("60px搜索未找到发送者昵称")
 
             # 如果在消息上方 60 像素内没找到昵称，可能是连续消息
             # 尝试在更大的范围内查找最近的昵称
@@ -1730,6 +1919,14 @@ class WeChatGroupListener:
                         if distance < 5:
                             continue
                         import re
+                        # 排除与消息内容相同或非常相似的文本
+                        if message_content:
+                            if abs(len(text) - len(message_content)) <= 2 and len(text) >= 2:
+                                continue
+                            if len(text) >= 3:
+                                overlap = sum(1 for c in text if c in message_content) / len(text)
+                                if overlap > 0.7 and len(text) >= 4:
+                                    continue
                         if re.match(r'^\d{1,2}:\d{2}$', text):
                             continue
                         if text.replace(' ', '').isdigit():
@@ -1738,6 +1935,9 @@ class WeChatGroupListener:
                             continue
                         if '新消息' in text or '条新' in text:
                             continue
+                        # 排除包含 @ 的文本
+                        if '@' in text or text.startswith('\uff20'):
+                            continue
                         if 1 <= len(text) <= 12:
                             all_nickname_candidates.append((text, confidence, distance, bbox))
                             logger.debug(f"扩大搜索 - 昵称候选: '{text}', 距离: {distance}px")
@@ -1745,17 +1945,21 @@ class WeChatGroupListener:
                 if all_nickname_candidates:
                     all_nickname_candidates.sort(key=lambda x: x[2])
                     sender = all_nickname_candidates[0][0]
-                    logger.debug(f"扩大搜索找到发送者: {sender}")
+                    logger.info(f"扩大搜索找到发送者: {sender}")
+                else:
+                    logger.info("扩大搜索(500px)未找到发送者昵称")
 
             if sender:
                 return sender
 
             # 备选方案：根据消息气泡的相对坐标裁剪区域
             # 计算昵称区域（相对坐标）
-            nick_top = max(0, rel_top - 80)
-            nick_bottom = rel_bottom
-            nick_left = 0
-            nick_right = min(full_w, rel_left + 200)
+            # 关键：只裁剪消息上方的昵称区域，不包含消息气泡本身
+            # 昵称在消息上方约5-40像素，宽度通常不超过150像素
+            nick_top = max(0, rel_top - 50)
+            nick_bottom = rel_top  # 只到消息顶部，不包含消息内容
+            nick_left = max(0, rel_left - 10)  # 从消息左侧开始
+            nick_right = min(full_w, rel_left + 150)  # 昵称宽度通常不超过150像素
 
             if nick_right <= nick_left or nick_bottom <= nick_top:
                 logger.debug("昵称区域无效")
@@ -1815,18 +2019,41 @@ class WeChatGroupListener:
                     # 排除"发送"等按钮文字
                     if text in ['发送', 'send', 'Send']:
                         continue
+                    # 排除与消息内容相同或非常相似的文本
+                    # OCR可能把消息内容误识别（如"幺幺哒"→"么么哒"），不是昵称
+                    if message_content:
+                        # 长度相近的文本很可能是消息内容而非昵称
+                        if abs(len(text) - len(message_content)) <= 2 and len(text) >= 2:
+                            logger.debug(f"备选方案-排除与消息长度相近的文本: '{text}' (消息: '{message_content[:30]}')")
+                            continue
+                        # 字符重叠过滤（覆盖OCR误识别情况）
+                        if len(text) >= 3:
+                            overlap = sum(1 for c in text if c in message_content) / len(text)
+                            if overlap > 0.7 and len(text) >= 4:
+                                logger.debug(f"备选方案-排除与消息重叠: '{text}'")
+                                continue
+                    # 排除包含 @ 的文本（@ 提及内容，不是发送者昵称）
+                    # 昵称不会包含 @ 符号
+                    if '@' in text or text.startswith('\uff20'):
+                        continue
 
-                    # 昵称通常是2-20个字符
-                    if 1 < len(text) <= 20:
+                    # 昵称通常是2-10个字符（微信昵称一般不超过10个汉字/字符）
+                    if 1 < len(text) <= 10:
                         sender_candidates.append((text, confidence, bbox))
 
-                # 返回第一个候选昵称（通常是消息发送者）
                 if sender_candidates:
+                    # 优先返回在 member_registry 中已注册的昵称
+                    if self.member_registry:
+                        for text, confidence, bbox in sender_candidates:
+                            if self.member_registry.get_wxid(session.group, text):
+                                logger.info(f"备选方案-找到已注册的发送者: {text}")
+                                return text
+                    # 没有已注册的匹配，返回第一个候选
                     sender = sender_candidates[0][0]
-                    logger.info(f"找到发送者候选: {sender}")
+                    logger.info(f"备选方案-找到发送者候选: {sender}")
                     return sender
 
-                logger.debug("未找到发送者")
+                logger.info("备选方案-未找到发送者")
 
         except Exception as e:
             logger.debug(f"OCR识别发送者异常: {e}")
@@ -1839,11 +2066,33 @@ class WeChatGroupListener:
             for path in temp_paths:
                 _delete_screenshot(path)
 
+            # 如果窗口原本是最小化的，OCR完成后恢复最小化
+            if was_minimized and session.hwnd and win32gui.IsWindow(session.hwnd):
+                try:
+                    current_rect = win32gui.GetWindowRect(session.hwnd)
+                    # 如果窗口当前是可见的（不在最小化位置），恢复最小化
+                    if current_rect[0] >= 0 and current_rect[1] >= 0:
+                        win32gui.ShowWindow(session.hwnd, win32con.SW_MINIMIZE)
+                        logger.debug("OCR完成后恢复窗口最小化")
+                except Exception:
+                    pass
+
     def _is_at_me(self, group: str, content: str) -> bool:
         nickname = self.group_nicknames.get(group)
         if not nickname:
+            logger.warning(f"_is_at_me: 群 '{group}' 未加载群昵称，无法判断是否被@")
             return False
-        return f"@{nickname}" in content or f"@{nickname}\u2005" in content
+
+        # 归一化 content 中的特殊空格字符（微信在 @昵称 后可能使用 \u2005 等不可见空格）
+        normalized = content.replace("\u2005", " ").replace("\xa0", " ")
+        # 同时检查原始 content 和归一化后的 content
+        at_pattern = f"@{nickname}"
+        result = at_pattern in content or at_pattern in normalized
+        if not result:
+            logger.info(f"_is_at_me: 群 '{group}' 未匹配到 @{nickname}，content前80字符: '{content[:80]}'")
+        else:
+            logger.info(f"_is_at_me: 群 '{group}' 匹配到 @{nickname}")
+        return result
 
     def _should_send_reply(self, event: MessageEvent) -> bool:
         if not self.reply_on_at:
