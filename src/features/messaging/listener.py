@@ -1038,10 +1038,34 @@ def _find_session_list(root):
     return None
 
 
-def _find_session_item(root, group_name: str):
+def _find_session_item(root, group_name: str, scroll_to_top: bool = True):
+    """查找会话列表中的群聊项。
+
+    Args:
+        root: UIA 根控件
+        group_name: 群名称
+        scroll_to_top: 是否先滚动列表到顶部（确保置顶群聊可见）
+
+    Returns:
+        会话项控件，未找到返回 None
+    """
     session_list = _find_session_list(root)
     if not session_list:
         return None
+
+    # 滚动到顶部，确保置顶的群聊可见
+    if scroll_to_top:
+        try:
+            # 使用 SendKeys 发送 Home 键滚动到顶部
+            session_list.SetFocus()
+            time.sleep(0.1)
+            # 多按几次 Home 键确保滚动到最顶部
+            for _ in range(3):
+                session_list.SendKeys("{Home}", waitTime=0.1)
+                time.sleep(0.1)
+            logger.debug("已将会话列表滚动到顶部")
+        except Exception as e:
+            logger.debug(f"滚动会话列表失败: {e}")
 
     candidates = []
     try:
@@ -1242,24 +1266,37 @@ class WeChatGroupListener:
                 continue
 
             logger.info(f"正在为群 '{group}' 打开独立窗口 ({i+1}/{len(self.groups)})...")
-            
-            # _ensure_subwindow 内部会自动确保主窗口可见再操作
-            hwnd = self._ensure_subwindow(group, chat_already_open=True)
-            
-            root = uia.ControlFromHandle(hwnd)
-            msg_list = _find_message_list(root)
-            if not msg_list:
-                raise RuntimeError(f"未找到群聊消息列表: {group}")
-            baseline = _read_visible_items(msg_list)
-            
-            all_sessions[group] = _ListenSession(
-                group=group,
-                hwnd=hwnd,
-                root=root,
-                msg_list=msg_list,
-                seen={item.key for item in baseline},
-            )
-            logger.info(f"已为群 '{group}' 创建监听 session (hwnd={hwnd})")
+
+            try:
+                # _ensure_subwindow 内部会自动确保主窗口可见再操作
+                hwnd = self._ensure_subwindow(group, chat_already_open=True)
+
+                root = uia.ControlFromHandle(hwnd)
+                msg_list = _find_message_list(root)
+                if not msg_list:
+                    raise RuntimeError(f"未找到群聊消息列表: {group}")
+                baseline = _read_visible_items(msg_list)
+
+                all_sessions[group] = _ListenSession(
+                    group=group,
+                    hwnd=hwnd,
+                    root=root,
+                    msg_list=msg_list,
+                    seen={item.key for item in baseline},
+                )
+                logger.info(f"已为群 '{group}' 创建监听 session (hwnd={hwnd})")
+
+                # 增加窗口间等待时间，避免微信资源竞争
+                if i < len(self.groups) - 1:
+                    time.sleep(1.5)
+
+            except Exception as e:
+                logger.error(f"为群 '{group}' 打开独立窗口失败: {e}")
+                # 继续尝试其他群，而不是直接失败
+                continue
+
+        if not all_sessions:
+            raise RuntimeError("未能成功打开任何独立窗口")
 
         # 保存所有 session
         self.sessions.update(all_sessions)
@@ -1502,16 +1539,26 @@ class WeChatGroupListener:
         except Exception as e:
             logger.debug(f"最小化独立窗口失败: {e}")
 
-    def _ensure_subwindow(self, group: str, chat_already_open: bool = False) -> int:
+    def _ensure_subwindow(self, group: str, chat_already_open: bool = False, max_retries: int = 2) -> int:
+        """确保独立聊天窗口已打开。
+
+        Args:
+            group: 群名称
+            chat_already_open: 主窗口是否已打开该群聊
+            max_retries: 最大重试次数
+
+        Returns:
+            独立窗口句柄
+        """
         main_hwnd = self.client.window.hwnd
         main_title = win32gui.GetWindowText(main_hwnd) or ""
-        
+
         # 特殊情况：如果主窗口的标题就是群名，说明主窗口本身就是独立窗口
         # 这可能发生在：上次程序异常退出后，独立窗口被误识别为主窗口
         if main_title == group or re.match(rf'^{re.escape(group)}(\s*\(\d+\))?$', main_title):
             logger.debug(f"主窗口标题 '{main_title}' 匹配群名 '{group}'，直接使用")
             return main_hwnd
-        
+
         # 先检查是否已有独立窗口
         hwnd = _find_window_by_title(group, exclude_hwnd=main_hwnd)
         if hwnd:
@@ -1520,34 +1567,59 @@ class WeChatGroupListener:
 
         logger.debug(f"未找到独立窗口 '{group}'，需要打开新窗口")
 
-        # 关键：在操作主窗口前，确保主窗口可见
-        # 微信在有独立窗口可见时会自动隐藏主窗口
-        # 必须先最小化所有独立窗口，再恢复主窗口
-        self._ensure_main_window_visible()
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                # 关键：在操作主窗口前，确保主窗口可见
+                # 微信在有独立窗口可见时会自动隐藏主窗口
+                # 必须先最小化所有独立窗口，再恢复主窗口
+                self._ensure_main_window_visible()
 
-        if not chat_already_open:
-            if not self.client.chat_window.open_chat(group, target_type="group"):
-                raise RuntimeError(f"打开群聊失败: {group}")
-            time.sleep(0.8)
+                if not chat_already_open:
+                    if not self.client.chat_window.open_chat(group, target_type="group"):
+                        raise RuntimeError(f"打开群聊失败: {group}")
+                    time.sleep(1.0)  # 增加等待时间
 
-        item = _find_session_item(self.client.window.uia.root, group)
-        if not item and chat_already_open:
-            logger.debug(f"当前会话项未找到，重新搜索打开群聊: {group}")
-            if not self.client.chat_window.open_chat(group, target_type="group"):
-                raise RuntimeError(f"打开群聊失败: {group}")
-            time.sleep(0.8)
-            item = _find_session_item(self.client.window.uia.root, group)
+                item = _find_session_item(self.client.window.uia.root, group)
+                if not item and chat_already_open:
+                    logger.debug(f"当前会话项未找到，重新搜索打开群聊: {group}")
+                    if not self.client.chat_window.open_chat(group, target_type="group"):
+                        raise RuntimeError(f"打开群聊失败: {group}")
+                    time.sleep(1.0)
+                    item = _find_session_item(self.client.window.uia.root, group)
 
-        if not item or not _double_click_control(item):
-            raise RuntimeError(f"打开独立聊天窗口失败: {group}")
+                if not item or not _double_click_control(item):
+                    raise RuntimeError(f"打开独立聊天窗口失败: {group}")
 
-        deadline = time.time() + 5
-        while time.time() < deadline:
-            hwnd = _find_window_by_title(group, exclude_hwnd=main_hwnd)
-            if hwnd:
-                return hwnd
-            time.sleep(0.2)
-        raise RuntimeError(f"等待独立聊天窗口超时: {group}")
+                # 增加超时时间到 15 秒
+                deadline = time.time() + 15
+                while time.time() < deadline:
+                    hwnd = _find_window_by_title(group, exclude_hwnd=main_hwnd)
+                    if hwnd:
+                        logger.info(f"成功打开独立窗口: {group} (hwnd={hwnd})")
+                        return hwnd
+                    time.sleep(0.3)
+
+                raise RuntimeError(f"等待独立聊天窗口超时: {group}")
+
+            except Exception as e:
+                last_error = e
+                logger.warning(f"打开独立窗口 '{group}' 失败 (尝试 {attempt + 1}/{max_retries}): {e}")
+
+                # 重试前关闭可能残留的窗口
+                try:
+                    for hwnd, title, _ in _find_wechat_windows():
+                        if group in title and hwnd != main_hwnd:
+                            logger.info(f"关闭残留窗口: {title}")
+                            win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+                    time.sleep(0.5)
+                except Exception:
+                    pass
+
+                # 等待一段时间后重试
+                time.sleep(1.5)
+
+        raise RuntimeError(f"打开独立窗口 '{group}' 失败，已重试 {max_retries} 次: {last_error}")
 
     def _run_loop(self) -> None:
         logger.info(f"开始监听群聊: {', '.join(self.groups)}")
