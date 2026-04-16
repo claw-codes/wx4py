@@ -1672,6 +1672,9 @@ class WeChatGroupListener:
         sender_name = None
         matched_by = None  # 记录匹配方式
 
+        # 获取当前群的用户自己的昵称
+        my_nickname = self.group_nicknames.get(session.group)
+
         # OCR识别发送者昵称（完全静默，无鼠标操作）
         ocr_sender = self._ocr_recognize_sender(session, item, content)
 
@@ -1694,12 +1697,27 @@ class WeChatGroupListener:
                     sender_wxid = matched_wxid
                     matched_by = "模糊匹配"
 
+        # 如果 OCR 识别失败，或者识别结果无法匹配任何已注册成员，视为用户自己
+        # 这种情况可能是：
+        # 1. 用户自己@自己，OCR识别出错导致昵称乱码或识别失败
+        # 2. OCR 识别的昵称与群成员列表中任何人都匹配不上
+        if not sender_wxid and my_nickname:
+            if ocr_sender and sender_name:
+                logger.info(f"[{session.group}] OCR识别昵称 '{sender_name}' 未匹配到群成员，视为自己 ({my_nickname})")
+            else:
+                logger.info(f"[{session.group}] OCR识别失败，视为自己 ({my_nickname})")
+            sender_name = my_nickname
+            # 从 member_registry 中根据昵称查找自己的 wxid
+            if self.member_registry:
+                sender_wxid = self.member_registry.get_wxid(session.group, my_nickname)
+            matched_by = "自己"
+
         # 打印结果
         if sender_name:
             if sender_wxid:
                 logger.info(f"[{session.group}] {sender_name} ({sender_wxid}): {content[:50]} [{matched_by or '精确匹配'}]")
             else:
-                logger.info(f"[{session.group}] {sender_name} (微信ID未注册): {content[:50]}")
+                logger.info(f"[{session.group}] {sender_name} (自己): {content[:50]}")
         else:
             logger.info(f"[{session.group}] [未知发送者]: {content[:50]}")
 
