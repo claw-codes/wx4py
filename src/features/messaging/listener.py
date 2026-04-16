@@ -1679,38 +1679,49 @@ class WeChatGroupListener:
         ocr_sender = self._ocr_recognize_sender(session, item, content)
 
         if ocr_sender:
-            sender_name = ocr_sender
-
-            # 尝试精确匹配
-            if self.member_registry:
-                sender_wxid = self.member_registry.get_wxid(session.group, sender_name)
-                if sender_wxid:
-                    matched_by = "精确匹配"
-
-            # 如果精确匹配失败，尝试模糊匹配
-            if not sender_wxid and self.member_registry:
-                fuzzy_result = self.member_registry.fuzzy_match_member(session.group, sender_name)
-                if fuzzy_result:
-                    matched_name, matched_wxid = fuzzy_result
-                    # 更新为匹配到的昵称（可能更完整）
-                    sender_name = matched_name
-                    sender_wxid = matched_wxid
-                    matched_by = "模糊匹配"
-
-        # 如果 OCR 识别失败，或者识别结果无法匹配任何已注册成员，视为用户自己
-        # 这种情况可能是：
-        # 1. 用户自己@自己，OCR识别出错导致昵称乱码或识别失败
-        # 2. OCR 识别的昵称与群成员列表中任何人都匹配不上
-        if not sender_wxid and my_nickname:
-            if ocr_sender and sender_name:
-                logger.info(f"[{session.group}] OCR识别昵称 '{sender_name}' 未匹配到群成员，视为自己 ({my_nickname})")
+            # 特殊处理：OCR 返回 "自己" 表示消息在右侧（自己发的）
+            if ocr_sender == "自己":
+                if my_nickname:
+                    sender_name = my_nickname
+                    # 从 member_registry 中查找自己的 wxid
+                    if self.member_registry:
+                        sender_wxid = self.member_registry.get_wxid(session.group, my_nickname)
+                    matched_by = "自己(位置判断)"
+                    logger.info(f"[{session.group}] OCR识别为'自己'，使用群昵称: {my_nickname}")
+                else:
+                    sender_name = "自己"
+                    sender_wxid = None
+                    matched_by = "自己(位置判断)"
             else:
-                logger.info(f"[{session.group}] OCR识别失败，视为自己 ({my_nickname})")
-            sender_name = my_nickname
-            # 从 member_registry 中根据昵称查找自己的 wxid
-            if self.member_registry:
-                sender_wxid = self.member_registry.get_wxid(session.group, my_nickname)
-            matched_by = "自己"
+                sender_name = ocr_sender
+
+                # 尝试精确匹配
+                if self.member_registry:
+                    sender_wxid = self.member_registry.get_wxid(session.group, sender_name)
+                    if sender_wxid:
+                        matched_by = "精确匹配"
+
+                # 如果精确匹配失败，尝试模糊匹配
+                if not sender_wxid and self.member_registry:
+                    fuzzy_result = self.member_registry.fuzzy_match_member(session.group, sender_name)
+                    if fuzzy_result:
+                        matched_name, matched_wxid = fuzzy_result
+                        # 更新为匹配到的昵称（可能更完整）
+                        sender_name = matched_name
+                        sender_wxid = matched_wxid
+                        matched_by = "模糊匹配"
+
+        # 如果 OCR 识别失败，或者识别结果无法匹配任何已注册成员
+        # 标记为"未知群友"而不是默认为"自己"
+        if not sender_wxid and sender_name != my_nickname:
+            if ocr_sender and sender_name:
+                logger.warning(f"[{session.group}] OCR识别昵称 '{sender_name}' 未匹配到群成员，标记为未知发送者")
+            else:
+                logger.warning(f"[{session.group}] OCR识别失败，标记为未知发送者")
+            # 标记为"未知群友"
+            sender_name = "未知群友"
+            sender_wxid = None
+            matched_by = "未知"
 
         # 打印结果
         if sender_name:
@@ -1826,8 +1837,9 @@ class WeChatGroupListener:
 
         策略：
         1. 使用PrintWindow截取整个窗口（支持最小化窗口）
-        2. 根据消息内容定位消息位置
-        3. 在消息上方查找发送者昵称
+        2. 根据截图宽度判断消息是否在右侧（自己发的）
+        3. 如果在右侧，直接返回"自己"
+        4. 如果在左侧，使用OCR识别发送者昵称
 
         Args:
             session: 监听会话
@@ -1835,7 +1847,7 @@ class WeChatGroupListener:
             message_content: 已知的消息内容（用于定位）
 
         Returns:
-            发送者昵称，失败返回None
+            发送者昵称，"自己" 表示自己发的消息，失败返回None
         """
         import win32gui
         import datetime
@@ -1858,14 +1870,21 @@ class WeChatGroupListener:
                 return None
 
             target_hwnd = session.hwnd
+            print(f"[OCR识别函数] msg_rect=({msg_rect.left}, {msg_rect.top}, {msg_rect.right}, {msg_rect.bottom})", flush=True)
 
             # 保存窗口原始状态，用于判断是否需要在OCR完成后恢复最小化
+            # 注意：这个变量必须在快速判断之前定义，因为finally块会使用它
             try:
                 original_win_rect = win32gui.GetWindowRect(target_hwnd)
                 was_minimized = original_win_rect[0] < 0 or original_win_rect[1] < 0
             except Exception:
                 original_win_rect = None
                 was_minimized = False
+
+            # ============================================================
+            # 注意：快速判断逻辑移到截图之后，使用截图的实际宽度来判断
+            # 因为 win32gui.GetWindowRect 包含窗口边框，而截图只包含客户区
+            # ============================================================
 
             # 获取窗口标题验证
             title = win32gui.GetWindowText(target_hwnd)
@@ -1892,89 +1911,78 @@ class WeChatGroupListener:
             full_debug_path = os.path.join(debug_dir, f'full_{timestamp}.png')
             full_img.save(full_debug_path)
 
-            # 获取窗口在屏幕上的实际位置
-            # 注意：_capture_window_full 可能移动了窗口，需要重新获取 msg_rect
-            # 否则用旧坐标 - 新坐标 = 错误的相对位置
-            win_rect = win32gui.GetWindowRect(target_hwnd)
-            win_left, win_top = win_rect[0], win_rect[1]
-            logger.debug(f"窗口当前屏幕位置: ({win_left}, {win_top})")
+            # ============================================================
+            # 【新策略】使用OCR识别消息位置，然后判断左右
+            # UIA坐标不可靠，必须使用OCR来确定消息的实际位置
+            # ============================================================
 
-            # 重新获取消息气泡坐标（窗口移动后UIA坐标已更新）
-            try:
-                msg_rect = item.control.BoundingRectangle
-            except Exception:
-                logger.warning("窗口移动后无法重新获取消息气泡坐标")
-                return None
+            # 检测是否是深色模式（微信深色模式背景是深色的）
+            pixels = list(full_img.getdata())
+            r_vals = [p[0] for p in pixels if len(p) >= 3]
+            import statistics
+            avg_r = statistics.mean(r_vals) if r_vals else 0
+            is_dark_mode = avg_r < 100
 
-            if not msg_rect:
-                logger.warning("窗口移动后消息气泡坐标为空")
-                return None
+            # 如果是深色模式，进行反色处理以便 OCR 更好地识别
+            ocr_image_path = full_debug_path
+            if is_dark_mode:
+                try:
+                    from PIL import ImageOps
+                    rgb_img = full_img.convert('RGB')
+                    inverted_img = ImageOps.invert(rgb_img)
+                    inverted_path = os.path.join(debug_dir, f'inverted_{timestamp}.png')
+                    inverted_img.save(inverted_path)
+                    ocr_image_path = inverted_path
+                    temp_paths.append(inverted_path)
+                    logger.info(f"深色模式检测，已生成反色图片")
+                except Exception as e:
+                    logger.warning(f"反色处理失败: {e}，使用原图")
 
-            logger.info(f"消息气泡(屏幕坐标): ({msg_rect.left}, {msg_rect.top}) - ({msg_rect.right}, {msg_rect.bottom})")
-
-            # 将屏幕坐标转换为截图内的相对坐标
-            rel_left = msg_rect.left - win_left
-            rel_top = msg_rect.top - win_top
-            rel_right = msg_rect.right - win_left
-            rel_bottom = msg_rect.bottom - win_top
-            logger.info(f"消息气泡(截图相对坐标): ({rel_left}, {rel_top}) - ({rel_right}, {rel_bottom})")
-
-            # 新策略：根据消息内容定位发送者昵称
-            # 1. 对完整截图进行 OCR
-            # 2. 找到消息内容的位置
-            # 3. 在消息内容上方查找昵称
             from src.utils.ocr_utils import recognize_text
-            texts = recognize_text(full_debug_path)
-            logger.info(f"完整截图OCR识别到 {len(texts)} 个文本块")
+            texts = recognize_text(ocr_image_path)
+            logger.info(f"OCR识别到 {len(texts)} 个文本块")
 
-            # 打印所有OCR结果用于调试
-            logger.info("=== OCR原始识别结果 ===")
-            for i, (text, confidence, bbox) in enumerate(texts):
-                logger.info(f"  [{i}] text='{text}', conf={confidence:.2f}, bbox={bbox}")
-
-            # 已知的消息内容
-            # message_content 是传入的参数
-            logger.info(f"待匹配的消息内容: '{message_content}' (长度: {len(message_content) if message_content else 0})")
+            # 打印OCR结果用于调试
+            for i, (text, confidence, bbox) in enumerate(texts[:10]):
+                left_x = bbox[0][0]
+                center_x = (bbox[0][0] + bbox[1][0]) / 2
+                print(f"[OCR] [{i}] '{text[:20]}...' left_x={left_x:.0f}, center_x={center_x:.0f}", flush=True)
 
             # 查找消息内容的位置
-            # 当有多个相同内容的消息时，优先选择左侧的候选
-            # 原因：别人的消息在左侧（left_x 较小），自己发的消息在右侧
-            # UIA 不区分左右，所以可能匹配到自己发的同内容消息
-            # 优先选择左侧候选，可以确保找到正确的发送者昵称
             msg_bbox = None
             msg_candidates = []
             for text, confidence, bbox in texts:
                 if message_content and message_content in text:
                     msg_candidates.append((text, confidence, bbox))
-                    logger.info(f"找到消息内容候选(完全匹配) '{text}' 位置: {bbox}")
-                # 也尝试反向匹配（OCR结果在消息内容中）
                 elif message_content and text in message_content:
                     msg_candidates.append((text, confidence, bbox))
-                    logger.info(f"找到消息内容候选(部分匹配) '{text}' 位置: {bbox}")
-                # 尝试归一化空格后匹配
                 elif message_content:
                     normalized_content = message_content.replace("\u2005", "").replace("\xa0", "").strip()
                     normalized_text = text.replace("\u2005", "").replace("\xa0", "").strip()
                     if normalized_content in normalized_text or normalized_text in normalized_content:
                         msg_candidates.append((text, confidence, bbox))
-                        logger.info(f"找到消息内容候选(归一化匹配) '{text}' 位置: {bbox}")
 
             if msg_candidates:
-                # 先按 Y 坐标排序，找到与 UIA 气泡 Y 范围最接近的候选
-                # UIA 气泡 Y 范围: rel_top ~ rel_bottom
-                uia_y_center = (rel_top + rel_bottom) / 2
-                # 按与 UIA Y 中心的距离排序，选最近的
-                msg_candidates.sort(key=lambda x: abs((max(x[2][0][1], x[2][2][1]) + min(x[2][0][1], x[2][2][1])) / 2 - uia_y_center))
-                # 在 Y 坐标最近的候选中，优先选择左侧的（left_x 较小的）
-                # 别人的消息在左侧，如果有同内容的别人消息，应该选左侧的
-                best_y_dist = abs((max(msg_candidates[0][2][0][1], msg_candidates[0][2][2][1]) + min(msg_candidates[0][2][0][1], msg_candidates[0][2][2][1])) / 2 - uia_y_center)
-                close_candidates = [c for c in msg_candidates if abs((max(c[2][0][1], c[2][2][1]) + min(c[2][0][1], c[2][2][1])) / 2 - uia_y_center) <= best_y_dist + 30]
-                # 在Y坐标接近的候选中，优先选择左侧的
-                close_candidates.sort(key=lambda x: x[2][0][0])  # 按 left_x 升序
-                msg_text, _, msg_bbox = close_candidates[0]
-                logger.info(f"选择消息候选: '{msg_text}' 位置: {msg_bbox} (共{len(msg_candidates)}个候选, {len(close_candidates)}个Y接近)")
+                # 【关键修复】当有多个匹配的消息时，选择 Y 坐标最大的（最新的消息）
+                # 因为截图是从上到下的，Y 坐标越大表示消息越新
+                msg_candidates.sort(key=lambda x: max(x[2][0][1], x[2][2][1]), reverse=True)
+                msg_text, _, msg_bbox = msg_candidates[0]
+                msg_left_x = msg_bbox[0][0]
+                msg_center_x = (msg_bbox[0][0] + msg_bbox[1][0]) / 2
+                msg_center_y = (msg_bbox[0][1] + msg_bbox[2][1]) / 2
 
-            # 如果找到了消息内容，在上方查找昵称
+                print(f"[位置判断] 找到消息 '{msg_text[:30]}...' center=({msg_center_x:.0f}, {msg_center_y:.0f}), 候选数={len(msg_candidates)}", flush=True)
+
+                # 如果消息中心在截图右侧（>50%），则自己发的
+                if msg_center_x > full_w * 0.5:
+                    print(f"[位置判断] 消息在右侧 (center_x={msg_center_x:.0f} > {full_w * 0.5:.0f})，识别为'自己'", flush=True)
+                    logger.info(f"[位置判断] 消息在右侧，识别为'自己'")
+                    return "自己"
+                else:
+                    print(f"[位置判断] 消息在左侧 (center_x={msg_center_x:.0f} <= {full_w * 0.5:.0f})，需要识别发送者", flush=True)
+                    logger.info(f"[位置判断] 消息在左侧，需要识别发送者")
+
+            # 如果没有找到消息内容，无法判断位置，继续使用OCR识别昵称
             sender = None
             if msg_bbox:
                 # 消息气泡的坐标（OCR 识别到的消息内容位置）
@@ -2014,7 +2022,28 @@ class WeChatGroupListener:
                             continue
                         # 过滤非昵称文本
                         import re
-                        # 排除与消息内容相同或非常相似的文本（不是昵称）
+
+                        # ===== 增强的昵称过滤规则 =====
+
+                        # 1. 排除系统消息
+                        system_keywords = ['撤回', '红包', '转账', '群公告', '入群', '退群', '修改群名', '新消息', '条新', '拍了拍', '邀请']
+                        if any(kw in text for kw in system_keywords):
+                            logger.debug(f"排除系统消息: '{text}'")
+                            continue
+
+                        # 2. 排除包含明显句子特征的内容（昵称通常不包含这些）
+                        # 昵称通常不会有逗号、句号、问号、感叹号等标点
+                        sentence_puncts = ['，', '。', '？', '！', ',', '.', '?', '!', '、', '；', '：', ';', ':']
+                        if any(punct in text for punct in sentence_puncts):
+                            logger.debug(f"排除句子(含标点): '{text}'")
+                            continue
+
+                        # 3. 排除过长的文本（昵称通常不超过8个字符）
+                        if len(text) > 8:
+                            logger.debug(f"排除过长文本: '{text}'")
+                            continue
+
+                        # 4. 排除与消息内容相同或非常相似的文本
                         if message_content:
                             # 长度相近的文本很可能是消息内容而非昵称
                             if abs(len(text) - len(message_content)) <= 2 and len(text) >= 2:
@@ -2024,25 +2053,29 @@ class WeChatGroupListener:
                                 overlap = sum(1 for c in text if c in message_content) / len(text)
                                 if overlap > 0.7 and len(text) >= 4:
                                     continue
-                        # 排除时间格式
+
+                        # 5. 排除时间格式
                         if re.match(r'^\d{1,2}:\d{2}$', text):
                             continue
-                        # 排除纯数字
+
+                        # 6. 排除纯数字
                         if text.replace(' ', '').isdigit():
                             continue
-                        # 排除群名
+
+                        # 7. 排除群名（包含数字和括号）
                         if re.search(r'[（(]\s*\d+\s*[）)]', text):
                             continue
-                        # 排除通知类
-                        if '新消息' in text or '条新' in text:
-                            continue
-                        # 排除包含 @ 的文本（@ 提及内容，不是发送者昵称）
-                        # 昵称不会包含 @ 符号
+
+                        # 8. 排除包含 @ 的文本
                         if '@' in text or text.startswith('\uff20'):
                             continue
 
-                        # 昵称长度通常是 1-12 个字符（排除长文本）
-                        if 1 <= len(text) <= 12:
+                        # 9. 排除纯英文单词但过长的（可能是消息内容）
+                        if re.match(r'^[a-zA-Z\s]+$', text) and len(text) > 10:
+                            continue
+
+                        # 昵称长度通常是 1-8 个字符（更严格的限制）
+                        if 1 <= len(text) <= 8:
                             nickname_candidates.append((text, confidence, distance, bbox))
                             logger.debug(f"昵称候选: '{text}', 距离消息: {distance}px")
 
@@ -2078,7 +2111,23 @@ class WeChatGroupListener:
                         if distance < 5:
                             continue
                         import re
-                        # 排除与消息内容相同或非常相似的文本
+
+                        # ===== 增强的昵称过滤规则 =====
+                        # 1. 排除系统消息
+                        system_keywords = ['撤回', '红包', '转账', '群公告', '入群', '退群', '修改群名', '新消息', '条新', '拍了拍', '邀请']
+                        if any(kw in text for kw in system_keywords):
+                            continue
+
+                        # 2. 排除包含明显句子特征的内容
+                        sentence_puncts = ['，', '。', '？', '！', ',', '.', '?', '!', '、', '；', '：', ';', ':']
+                        if any(punct in text for punct in sentence_puncts):
+                            continue
+
+                        # 3. 排除过长的文本
+                        if len(text) > 8:
+                            continue
+
+                        # 4. 排除与消息内容相同或非常相似的文本
                         if message_content:
                             if abs(len(text) - len(message_content)) <= 2 and len(text) >= 2:
                                 continue
@@ -2086,23 +2135,33 @@ class WeChatGroupListener:
                                 overlap = sum(1 for c in text if c in message_content) / len(text)
                                 if overlap > 0.7 and len(text) >= 4:
                                     continue
+
+                        # 5. 排除时间格式
                         if re.match(r'^\d{1,2}:\d{2}$', text):
                             continue
+
+                        # 6. 排除纯数字
                         if text.replace(' ', '').isdigit():
                             continue
+
+                        # 7. 排除群名
                         if re.search(r'[（(]\s*\d+\s*[）)]', text):
                             continue
-                        if '新消息' in text or '条新' in text:
-                            continue
-                        # 排除包含 @ 的文本
+
+                        # 8. 排除包含 @ 的文本
                         if '@' in text or text.startswith('\uff20'):
                             continue
-                        if 1 <= len(text) <= 12:
+
+                        # 9. 排除纯英文单词但过长的
+                        if re.match(r'^[a-zA-Z\s]+$', text) and len(text) > 10:
+                            continue
+
+                        if 1 <= len(text) <= 8:
                             # 关键检查：昵称水平位置是否与消息一致
                             # 微信布局：别人的消息在左侧，昵称也在左侧（left_x 较小）
                             #          自己的消息在右侧，上方没有昵称
                             nick_is_left = text_left_x < full_w * 0.3
-                            
+
                             if msg_is_right:
                                 # 消息在右侧（自己发的），如果昵称在左侧，说明是别人消息的昵称
                                 # 不应该匹配给自己
@@ -2114,7 +2173,7 @@ class WeChatGroupListener:
                                 if not nick_is_left:
                                     logger.debug(f"扩大搜索 - 跳过右侧昵称 '{text}' (left_x={text_left_x})，因为消息在左侧")
                                     continue
-                            
+
                             all_nickname_candidates.append((text, confidence, distance, bbox))
                             logger.debug(f"扩大搜索 - 昵称候选: '{text}', 距离: {distance}px, left_x: {text_left_x}")
 
@@ -2134,7 +2193,7 @@ class WeChatGroupListener:
 
             # 所有昵称查找都失败，根据消息左右位置判断是否是自己发的
             # 微信布局规则：自己消息在右侧，别人消息在左侧
-            # 只有在找不到昵称时才用位置判断
+            # 优先使用 OCR 匹配到的消息位置，如果没有则使用 UIA 的消息气泡坐标
             if msg_bbox:
                 msg_left_x = msg_bbox[0][0]  # 左上角的 X 坐标
                 msg_right_x = msg_bbox[1][0]  # 右上角的 X 坐标
@@ -2147,9 +2206,18 @@ class WeChatGroupListener:
                     logger.info(f"未找到昵称，消息中心在左侧（center_x={msg_center_x:.1f}, ratio={msg_center_ratio:.2f}），无法识别发送者")
                     return None
             else:
-                # msg_bbox 为空，无法判断
-                logger.info("未找到消息内容位置，无法识别发送者")
-                return None
+                # msg_bbox 为空，使用 UIA 的消息气泡坐标判断
+                # rel_left, rel_right, rel_top, rel_bottom 是 UIA 获取的消息气泡相对坐标
+                uia_msg_center_x = (rel_left + rel_right) / 2
+                uia_msg_center_ratio = uia_msg_center_x / full_w
+                logger.info(f"OCR未匹配到消息内容，使用UIA坐标判断: center_x={uia_msg_center_x:.1f}, ratio={uia_msg_center_ratio:.2f}")
+
+                if uia_msg_center_x > full_w * 0.5:
+                    logger.info(f"UIA坐标显示消息在右侧，识别为'自己'")
+                    return "自己"
+                else:
+                    logger.info(f"UIA坐标显示消息在左侧，无法识别发送者")
+                    return None
 
         except Exception as e:
             logger.debug(f"OCR识别发送者异常: {e}")
