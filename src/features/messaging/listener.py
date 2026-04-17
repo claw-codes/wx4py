@@ -280,14 +280,14 @@ def _capture_window_full(hwnd: int) -> Optional[Tuple[str, int, int]]:
         except Exception:
             pass
 
-        # 如果之前移动了窗口，将窗口移回原位
-        # 注意：不要在此处最小化窗口，因为调用方可能需要使用UIA获取控件坐标
-        # 调用方应在OCR完成后自行决定是否最小化窗口
+        # 如果之前移动了窗口，将窗口移回最小化状态
+        # 这一点很重要：窗口被恢复并移动后，UIA 控件坐标会被缓存
+        # 必须立即恢复最小化，否则后续 UIA 操作可能出现问题
         if moved_to_edge and saved_rect:
             try:
-                # 不恢复最小化，保持窗口可见以便UIA获取正确坐标
-                # win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
-                logger.debug("窗口保持可见（不恢复最小化，以便UIA获取正确坐标）")
+                # 恢复最小化状态
+                win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
+                logger.debug("截图完成后恢复窗口最小化")
             except Exception as e:
                 logger.info(f"恢复窗口最小化失败: {e}")
 
@@ -1678,14 +1678,40 @@ class WeChatGroupListener:
 
     def _poll_session(self, session: _ListenSession) -> None:
         session.scan_count += 1
+
+        # 检查窗口是否存在
+        import win32gui
         try:
-            items = _read_visible_items(session.msg_list)
-            if self.tail_size > 0:
-                items = items[-self.tail_size:]
-        except Exception as exc:
-            session.fail_count += 1
-            logger.debug(f"读取群聊消息失败: {session.group}: {exc}")
+            if not win32gui.IsWindow(session.hwnd):
+                logger.warning(f"窗口已关闭: {session.group}")
+                return
+        except Exception as e:
+            logger.warning(f"检查窗口状态失败: {session.group}: {e}")
             return
+
+        # 尝试读取消息列表
+        items = []
+        try:
+            # 总是重新获取 root 和 msg_list，确保控件是最新的
+            root = uia.ControlFromHandle(session.hwnd)
+            if root:
+                msg_list = _find_message_list(root)
+                if msg_list:
+                    session.msg_list = msg_list
+                    items = _read_visible_items(msg_list)
+                    if items:
+                        logger.debug(f"[{session.group}] 读取到 {len(items)} 条消息")
+                else:
+                    logger.debug(f"[{session.group}] 未找到消息列表")
+            else:
+                logger.debug(f"[{session.group}] 无法获取 root 控件")
+        except Exception as e:
+            logger.warning(f"读取群聊消息失败: {session.group}: {e}")
+            session.fail_count += 1
+            # 不要 return，继续尝试下一轮
+
+        if self.tail_size > 0:
+            items = items[-self.tail_size:]
 
         added = 0
         for item in items:
@@ -1698,7 +1724,12 @@ class WeChatGroupListener:
                 continue
             added += 1
             session.new_count += 1
-            self._handle_message(session, item)
+            try:
+                self._handle_message(session, item)
+            except Exception as e:
+                logger.error(f"处理消息异常: {session.group}: {e}")
+                import traceback
+                traceback.print_exc()
 
         self._update_next_scan(session, added)
 
@@ -2443,15 +2474,16 @@ class WeChatGroupListener:
             for path in temp_paths:
                 _delete_screenshot(path)
 
-            # 如果窗口原本是最小化的，且执行了截图操作，OCR完成后恢复最小化
-            # 只有截图操作才可能改变窗口状态，UIA快速判断不会改变窗口状态
+            # 如果窗口原本是最小化的，且执行了截图操作，确保窗口恢复最小化状态
+            # 注意：_capture_window_full 函数在截图完成后应该已经恢复了最小化
+            # 但为了确保安全，这里再检查一次
             if _did_screenshot and was_minimized and session.hwnd and win32gui.IsWindow(session.hwnd):
                 try:
                     current_rect = win32gui.GetWindowRect(session.hwnd)
-                    # 如果窗口当前是可见的（不在最小化位置），恢复最小化
+                    # 如果窗口当前是可见的（坐标非负），恢复最小化
                     if current_rect[0] >= 0 and current_rect[1] >= 0:
                         win32gui.ShowWindow(session.hwnd, win32con.SW_MINIMIZE)
-                        logger.debug("OCR完成后恢复窗口最小化")
+                        logger.debug("OCR finally 块：恢复窗口最小化")
                 except Exception:
                     pass
 
@@ -2554,19 +2586,74 @@ class WeChatGroupListener:
                 self._reply_queue.task_done()
 
     def _send_in_subwindow(self, session: _ListenSession, content: str) -> bool:
-        root = session.root
+        """
+        在独立窗口中发送回复消息。
+
+        确保窗口可见后再发送，避免在最小化窗口上操作导致意外激活其他窗口。
+        """
+        import win32gui
+        import win32con
+
+        # 检查窗口是否最小化
+        was_minimized = False
+        try:
+            win_rect = win32gui.GetWindowRect(session.hwnd)
+            # 最小化窗口的坐标通常是负值
+            was_minimized = win_rect[0] < 0 or win_rect[1] < 0
+        except Exception:
+            pass
+
+        # 如果窗口最小化，先恢复它
+        if was_minimized:
+            try:
+                logger.debug(f"窗口最小化，先恢复: {session.group}")
+                win32gui.ShowWindow(session.hwnd, win32con.SW_RESTORE)
+                time.sleep(0.5)  # 等待窗口恢复并渲染
+            except Exception as e:
+                logger.warning(f"恢复窗口失败: {e}")
+
+        # 窗口恢复后重新获取 root 控件（因为之前的控件可能已失效）
+        try:
+            root = uia.ControlFromHandle(session.hwnd)
+        except Exception as e:
+            logger.error(f"获取窗口控件失败: {session.group}, {e}")
+            # 如果之前是最小化的，恢复最小化状态
+            if was_minimized:
+                try:
+                    win32gui.ShowWindow(session.hwnd, win32con.SW_MINIMIZE)
+                except Exception:
+                    pass
+            return False
+
         edit = self._find_chat_input(root)
         if not edit:
             logger.error(f"未找到聊天输入框: {session.group}")
+            # 如果之前是最小化的，恢复最小化状态
+            if was_minimized:
+                try:
+                    win32gui.ShowWindow(session.hwnd, win32con.SW_MINIMIZE)
+                except Exception:
+                    pass
             return False
 
-        return ChatWindow.send_text_via_input(
+        result = ChatWindow.send_text_via_input(
             edit,
             content,
             clipboard_error="写入回复到剪贴板失败",
             send_error=f"发送群聊回复失败: {session.group}",
             logger_override=logger,
         )
+
+        # 如果之前窗口是最小化的，发送完成后重新最小化
+        if was_minimized:
+            try:
+                logger.debug(f"发送完成，恢复窗口最小化: {session.group}")
+                time.sleep(0.2)  # 等待消息发送完成
+                win32gui.ShowWindow(session.hwnd, win32con.SW_MINIMIZE)
+            except Exception as e:
+                logger.warning(f"最小化窗口失败: {e}")
+
+        return result
 
     @staticmethod
     def _find_chat_input(root):
@@ -2582,10 +2669,18 @@ class WeChatGroupListener:
         candidates = []
         try:
             root_rect = root.BoundingRectangle
+            # 检查 root_rect 是否有效（非最小化状态）
+            if root_rect.left < 0 or root_rect.top < 0 or root_rect.width() <= 0 or root_rect.height() <= 0:
+                logger.debug(f"窗口 BoundingRectangle 无效: {root_rect}，可能处于最小化状态")
+                return None
+
             for control, _depth in uia.WalkControl(root, includeTop=True, maxDepth=8):
                 if _safe_text(control, "ControlTypeName") != "EditControl":
                     continue
                 rect = control.BoundingRectangle
+                # 检查控件坐标是否有效
+                if rect.left < 0 or rect.top < 0:
+                    continue
                 if rect.top < root_rect.top + root_rect.height() * 0.55:
                     continue
                 width = rect.right - rect.left
