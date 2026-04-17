@@ -767,6 +767,29 @@ class MemberRegistry:
 
         return best_match
 
+    # OCR 常见混淆字符映射表
+    # 用于将 OCR 容易混淆的字符归一化为同一字符，提升短昵称的匹配率
+    _OCR_CONFUSABLE = {
+        'V': 'W', 'v': 'w',
+        'O': '0', '0': '0',
+        'l': 'I', '1': 'I', '|': 'I',
+        'S': '5', '5': '5',
+        'B': '8', '8': '8',
+        'Z': '2', '2': '2',
+        'G': '6', '6': '6',
+        'rn': 'm',
+    }
+
+    def _ocr_normalize(self, s: str) -> str:
+        """将 OCR 容易混淆的字符归一化，用于提升短昵称的匹配率。"""
+        # 先处理多字符混淆（如 rn -> m）
+        result = s
+        for k, v in self._OCR_CONFUSABLE.items():
+            if len(k) > 1:
+                result = result.replace(k, v)
+        # 再处理单字符混淆
+        return ''.join(self._OCR_CONFUSABLE.get(c, c) for c in result)
+
     def _similarity(self, s1: str, s2: str) -> float:
         """
         计算两个字符串的相似度。
@@ -775,6 +798,7 @@ class MemberRegistry:
         1. 包含关系：如果一个字符串包含另一个，提高分数
         2. 编辑距离：计算 Levenshtein 相似度
         3. 首尾字符匹配：昵称通常首尾字符更重要
+        4. OCR 混淆字符归一化：将容易混淆的字符归一化后再比较
         """
         if not s1 or not s2:
             return 0.0
@@ -784,6 +808,15 @@ class MemberRegistry:
 
         if s1 == s2:
             return 1.0
+
+        # OCR 混淆字符归一化比较
+        # 例如 OCR 把 "W" 识别为 "V"，归一化后两者都变成 "W"，相似度 = 0.9
+        norm_s1 = self._ocr_normalize(s1)
+        norm_s2 = self._ocr_normalize(s2)
+        if norm_s1 == norm_s2 and (norm_s1 != s1 or norm_s2 != s2):
+            # 归一化后相同，说明是 OCR 混淆导致的不同
+            # 给予高相似度但不是1.0（因为毕竟不是精确匹配）
+            return 0.9
 
         # 包含关系
         if s1 in s2 or s2 in s1:
@@ -796,16 +829,21 @@ class MemberRegistry:
         # Levenshtein 相似度
         edit_sim = self._levenshtein_similarity(s1, s2)
 
-        # 首尾字符匹配
+        # 归一化后的 Levenshtein 相似度
+        norm_edit_sim = self._levenshtein_similarity(norm_s1, norm_s2)
+
+        # 首尾字符匹配（也用归一化后的字符比较）
         prefix_score = 0.0
-        if s1[0] == s2[0]:
+        if s1[0] == s2[0] or norm_s1[0] == norm_s2[0]:
             prefix_score = 0.2
         suffix_score = 0.0
-        if s1[-1] == s2[-1]:
+        if s1[-1] == s2[-1] or norm_s1[-1] == norm_s2[-1]:
             suffix_score = 0.2
 
-        # 综合评分
-        final_score = max(contain_score, edit_sim) + prefix_score + suffix_score
+        # 综合评分（取原始和归一化后的最大值）
+        original_score = max(contain_score, edit_sim) + prefix_score + suffix_score
+        normalized_score = max(contain_score, norm_edit_sim) + prefix_score + suffix_score
+        final_score = max(original_score, normalized_score)
         return min(final_score, 1.0)
 
     def _levenshtein_similarity(self, s1: str, s2: str) -> float:
@@ -1713,7 +1751,7 @@ class WeChatGroupListener:
 
         # 如果 OCR 识别失败，或者识别结果无法匹配任何已注册成员
         # 标记为"未知群友"而不是默认为"自己"
-        if not sender_wxid and sender_name != my_nickname:
+        if sender_wxid is None and sender_name != my_nickname:
             if ocr_sender and sender_name:
                 logger.warning(f"[{session.group}] OCR识别昵称 '{sender_name}' 未匹配到群成员，标记为未知发送者")
             else:
@@ -1873,7 +1911,7 @@ class WeChatGroupListener:
             print(f"[OCR识别函数] msg_rect=({msg_rect.left}, {msg_rect.top}, {msg_rect.right}, {msg_rect.bottom})", flush=True)
 
             # 保存窗口原始状态，用于判断是否需要在OCR完成后恢复最小化
-            # 注意：这个变量必须在快速判断之前定义，因为finally块会使用它
+            # 注意：必须在所有 return 之前定义，因为 finally 块会使用它
             try:
                 original_win_rect = win32gui.GetWindowRect(target_hwnd)
                 was_minimized = original_win_rect[0] < 0 or original_win_rect[1] < 0
@@ -1881,10 +1919,55 @@ class WeChatGroupListener:
                 original_win_rect = None
                 was_minimized = False
 
+            # 标记是否执行了截图操作（UIA快速判断不需要截图）
+            # 只有执行了截图操作，才需要在 finally 中恢复窗口最小化状态
+            _did_screenshot = False
+
             # ============================================================
-            # 注意：快速判断逻辑移到截图之后，使用截图的实际宽度来判断
-            # 因为 win32gui.GetWindowRect 包含窗口边框，而截图只包含客户区
+            # 【UIA 快速判断】使用 UIA 控件位置判断消息是否在右侧（自己发的）
+            # 比依赖 OCR 匹配消息内容更可靠，特别是对于长消息
+            # 长消息在 OCR 中会被拆分成多个文本块，容易导致 center_x 误判
             # ============================================================
+            try:
+                # 检查 UIA 坐标是否有效（窗口最小化时坐标可能为负）
+                if msg_rect.left >= 0 and msg_rect.right > msg_rect.left:
+                    client_rect = win32gui.GetClientRect(target_hwnd)
+                    client_left_screen, _ = win32gui.ClientToScreen(
+                        target_hwnd, (client_rect[0], client_rect[1])
+                    )
+                    client_width = client_rect[2] - client_rect[0]
+
+                    if client_width > 100:
+                        msg_center_x = (msg_rect.left + msg_rect.right) / 2
+                        relative_x = (msg_center_x - client_left_screen) / client_width
+
+                        # 安全检查：relative_x 应在合理范围内 (0~1.5)
+                        # 如果超出范围，说明坐标计算异常，跳过快速判断
+                        if 0 <= relative_x <= 1.5:
+                            if relative_x > 0.5:
+                                logger.info(
+                                    f"[UIA快速判断] 消息在右侧 "
+                                    f"(relative_x={relative_x:.2f})，识别为'自己'"
+                                )
+                                print(
+                                    f"[UIA快速判断] 消息在右侧 "
+                                    f"(relative_x={relative_x:.2f})，识别为'自己'",
+                                    flush=True
+                                )
+                                return "自己"
+                            else:
+                                logger.info(
+                                    f"[UIA快速判断] 消息在左侧 "
+                                    f"(relative_x={relative_x:.2f})，继续OCR识别昵称"
+                                )
+                        else:
+                            logger.debug(
+                                f"[UIA快速判断] relative_x={relative_x:.2f} 超出合理范围，跳过快速判断"
+                            )
+            except Exception as e:
+                logger.debug(f"UIA快速判断失败，继续OCR流程: {e}")
+
+            # UIA 快速判断之后，如果窗口未最小化则截图流程不需要再检查
 
             # 获取窗口标题验证
             title = win32gui.GetWindowText(target_hwnd)
@@ -1894,6 +1977,7 @@ class WeChatGroupListener:
 
             # 无论窗口是否最小化，都使用 PrintWindow 截取目标窗口
             # 这样可以确保截取的是独立聊天窗口的内容，而不是屏幕上的其他内容
+            _did_screenshot = True
             logger.debug("使用PrintWindow截取目标窗口")
             capture_result = _capture_window_full(target_hwnd)
             if not capture_result:
@@ -1951,22 +2035,30 @@ class WeChatGroupListener:
             # 查找消息内容的位置
             msg_bbox = None
             msg_candidates = []
+            # 归一化消息内容，用于匹配
+            norm_content = message_content.replace("\u2005", "").replace("\xa0", "").strip() if message_content else ""
             for text, confidence, bbox in texts:
-                if message_content and message_content in text:
-                    msg_candidates.append((text, confidence, bbox))
-                elif message_content and text in message_content:
-                    msg_candidates.append((text, confidence, bbox))
-                elif message_content:
-                    normalized_content = message_content.replace("\u2005", "").replace("\xa0", "").strip()
-                    normalized_text = text.replace("\u2005", "").replace("\xa0", "").strip()
-                    if normalized_content in normalized_text or normalized_text in normalized_content:
-                        msg_candidates.append((text, confidence, bbox))
+                if not message_content:
+                    continue
+                norm_text = text.replace("\u2005", "").replace("\xa0", "").strip()
+                # 精确匹配（OCR 识别的整行文本与消息内容一致）
+                if norm_content == norm_text:
+                    msg_candidates.append((text, confidence, bbox, len(norm_text)))
+                # OCR 识别的文本包含完整消息内容（少见）
+                elif norm_content in norm_text:
+                    msg_candidates.append((text, confidence, bbox, len(norm_content)))
+                # 消息内容包含 OCR 文本（OCR 只识别了部分）
+                # 关键改进：要求匹配文本足够长，避免短子串误匹配
+                # 例如长消息 "@弦梦思凡 叽里呱啦..." 中，"叽里" 这样的短文本不应被匹配
+                elif norm_text in norm_content and len(norm_text) >= max(4, len(norm_content) * 0.2):
+                    msg_candidates.append((text, confidence, bbox, len(norm_text)))
 
             if msg_candidates:
-                # 【关键修复】当有多个匹配的消息时，选择 Y 坐标最大的（最新的消息）
-                # 因为截图是从上到下的，Y 坐标越大表示消息越新
-                msg_candidates.sort(key=lambda x: max(x[2][0][1], x[2][2][1]), reverse=True)
-                msg_text, _, msg_bbox = msg_candidates[0]
+                # 【关键修复】当有多个匹配的消息时，优先选择匹配度最高的（最长的匹配文本）
+                # 匹配度相同时，选择 Y 坐标最大的（最新的消息）
+                # 这样可以避免短子串匹配到错误的文本块
+                msg_candidates.sort(key=lambda x: (x[3], max(x[2][0][1], x[2][2][1])), reverse=True)
+                msg_text, _, msg_bbox, _ = msg_candidates[0]
                 msg_left_x = msg_bbox[0][0]
                 msg_center_x = (msg_bbox[0][0] + msg_bbox[1][0]) / 2
                 msg_center_y = (msg_bbox[0][1] + msg_bbox[2][1]) / 2
@@ -2081,8 +2173,32 @@ class WeChatGroupListener:
 
                 # 按距离排序，选择最近的
                 if nickname_candidates:
-                    nickname_candidates.sort(key=lambda x: x[2])
-                    sender = nickname_candidates[0][0]
+                    # 先判断消息的左右位置，过滤不匹配的候选
+                    msg_center_x = (msg_bbox[0][0] + msg_bbox[1][0]) / 2
+                    msg_is_right_side = msg_center_x > full_w * 0.5
+
+                    # 左右位置过滤：消息在左侧时，只保留左侧的昵称候选
+                    filtered_candidates = []
+                    for nc_text, nc_conf, nc_dist, nc_bbox in nickname_candidates:
+                        nc_left_x = nc_bbox[0][0]
+                        nick_is_left = nc_left_x < full_w * 0.3
+
+                        if msg_is_right_side:
+                            # 消息在右侧（自己发的），跳过左侧昵称
+                            if nick_is_left:
+                                logger.debug(f"60px搜索 - 跳过左侧昵称 '{nc_text}'，因为消息在右侧")
+                                continue
+                        else:
+                            # 消息在左侧（别人发的），跳过右侧昵称
+                            if not nick_is_left:
+                                logger.debug(f"60px搜索 - 跳过右侧昵称 '{nc_text}'，因为消息在左侧")
+                                continue
+                        filtered_candidates.append((nc_text, nc_conf, nc_dist, nc_bbox))
+
+                    # 如果过滤后还有候选，用过滤后的；否则用原始候选
+                    candidates_to_use = filtered_candidates if filtered_candidates else nickname_candidates
+                    candidates_to_use.sort(key=lambda x: x[2])
+                    sender = candidates_to_use[0][0]
                     logger.info(f"60px搜索找到发送者: {sender}")
                 else:
                     logger.info("60px搜索未找到发送者昵称")
@@ -2178,6 +2294,7 @@ class WeChatGroupListener:
                             logger.debug(f"扩大搜索 - 昵称候选: '{text}', 距离: {distance}px, left_x: {text_left_x}")
 
                 if all_nickname_candidates:
+                    # 先按距离排序
                     all_nickname_candidates.sort(key=lambda x: x[2])
                     sender = all_nickname_candidates[0][0]
                     logger.info(f"扩大搜索找到发送者: {sender}")
@@ -2191,7 +2308,91 @@ class WeChatGroupListener:
             if sender:
                 return sender
 
-            # 所有昵称查找都失败，根据消息左右位置判断是否是自己发的
+            # ============================================================
+            # 【MemberRegistry 反向查找】所有常规昵称查找都失败时，
+            # 利用已注册的群成员信息在 OCR 文本中反向搜索
+            # 这对于短昵称（如"W"）特别有效，因为 OCR 可能识别不准
+            # 但只要 OCR 文本中包含昵称的子串或相似文本就能匹配
+            # ============================================================
+            if not sender and self.member_registry and msg_bbox:
+                import re as _re
+                msg_top_y_check = msg_bbox[0][1]
+                with self.member_registry._lock:
+                    group_members = dict(self.member_registry._members.get(session.group, {}))
+
+                if group_members:
+                    # 消息在左侧，只查找左侧区域的昵称
+                    msg_is_left_side = msg_bbox[0][0] < full_w * 0.5
+                    best_reverse_match = None
+                    best_reverse_dist = float('inf')
+
+                    for member_name, member_wxid in group_members.items():
+                        # 跳过自己的昵称（消息在左侧不可能是自己的）
+                        if member_name == my_nickname:
+                            continue
+
+                        for text, confidence, bbox in texts:
+                            text_bottom_y = max(bbox[0][1], bbox[2][1])
+                            text_left_x = bbox[0][0]
+
+                            # 必须在消息上方
+                            if text_bottom_y >= msg_top_y_check:
+                                continue
+                            # 必须在消息上方合理范围内（最大200像素）
+                            if text_bottom_y < msg_top_y_check - 200:
+                                continue
+
+                            # 昵称水平位置检查
+                            if msg_is_left_side:
+                                nick_is_left = text_left_x < full_w * 0.3
+                                if not nick_is_left:
+                                    continue
+
+                            # 计算距离
+                            dist = msg_top_y_check - text_bottom_y
+
+                            # 匹配检查：精确匹配、包含匹配、模糊匹配
+                            norm_text = text.replace("\u2005", "").replace("\xa0", "").strip()
+                            norm_name = member_name.strip()
+
+                            matched = False
+                            match_score = 0
+                            if norm_text == norm_name:
+                                matched = True
+                                match_score = 100
+                            elif norm_name in norm_text:
+                                # 注册名是OCR文本的子串（如OCR识别"W：" 包含"W"）
+                                matched = True
+                                match_score = 80
+                            elif norm_text in norm_name:
+                                # OCR文本是注册名的子串
+                                matched = True
+                                match_score = 60
+                            else:
+                                # 模糊匹配
+                                sim = self.member_registry._similarity(norm_text, norm_name)
+                                if sim >= 0.5:
+                                    matched = True
+                                    match_score = int(sim * 50)
+
+                            if matched:
+                                # 优先选择匹配分数高的，分数相同选距离近的
+                                if best_reverse_match is None or (match_score, -best_reverse_dist) > (best_reverse_match[1], -best_reverse_dist):
+                                    best_reverse_match = (member_name, match_score)
+                                    best_reverse_dist = dist
+                                logger.debug(
+                                    f"反向查找匹配: OCR文本='{text}' -> 成员='{member_name}' "
+                                    f"(分数={match_score}, 距离={dist}px)"
+                                )
+
+                    if best_reverse_match:
+                        sender = best_reverse_match[0]
+                        logger.info(f"MemberRegistry反向查找找到发送者: {sender} (分数={best_reverse_match[1]})")
+                        return sender
+                    else:
+                        logger.info("MemberRegistry反向查找未找到匹配")
+
+            # 所有昵称查找都失败（包括 MemberRegistry 反向查找），根据消息左右位置判断是否是自己发的
             # 微信布局规则：自己消息在右侧，别人消息在左侧
             # 优先使用 OCR 匹配到的消息位置，如果没有则使用 UIA 的消息气泡坐标
             if msg_bbox:
@@ -2207,16 +2408,28 @@ class WeChatGroupListener:
                     return None
             else:
                 # msg_bbox 为空，使用 UIA 的消息气泡坐标判断
-                # rel_left, rel_right, rel_top, rel_bottom 是 UIA 获取的消息气泡相对坐标
-                uia_msg_center_x = (rel_left + rel_right) / 2
-                uia_msg_center_ratio = uia_msg_center_x / full_w
-                logger.info(f"OCR未匹配到消息内容，使用UIA坐标判断: center_x={uia_msg_center_x:.1f}, ratio={uia_msg_center_ratio:.2f}")
+                # 将 UIA 屏幕坐标转换为截图坐标
+                try:
+                    client_rect = win32gui.GetClientRect(target_hwnd)
+                    client_left_screen, _ = win32gui.ClientToScreen(
+                        target_hwnd, (client_rect[0], client_rect[1])
+                    )
+                    client_width = client_rect[2] - client_rect[0]
 
-                if uia_msg_center_x > full_w * 0.5:
-                    logger.info(f"UIA坐标显示消息在右侧，识别为'自己'")
-                    return "自己"
-                else:
-                    logger.info(f"UIA坐标显示消息在左侧，无法识别发送者")
+                    if client_width > 0:
+                        uia_msg_center_x = (msg_rect.left + msg_rect.right) / 2
+                        uia_relative_x = (uia_msg_center_x - client_left_screen) / client_width
+
+                        logger.info(f"OCR未匹配到消息内容，使用UIA坐标判断: relative_x={uia_relative_x:.2f}")
+
+                        if uia_relative_x > 0.5:
+                            logger.info(f"UIA坐标显示消息在右侧，识别为'自己'")
+                            return "自己"
+                        else:
+                            logger.info(f"UIA坐标显示消息在左侧，无法识别发送者")
+                            return None
+                except Exception as e:
+                    logger.debug(f"UIA坐标fallback判断失败: {e}")
                     return None
 
         except Exception as e:
@@ -2230,8 +2443,9 @@ class WeChatGroupListener:
             for path in temp_paths:
                 _delete_screenshot(path)
 
-            # 如果窗口原本是最小化的，OCR完成后恢复最小化
-            if was_minimized and session.hwnd and win32gui.IsWindow(session.hwnd):
+            # 如果窗口原本是最小化的，且执行了截图操作，OCR完成后恢复最小化
+            # 只有截图操作才可能改变窗口状态，UIA快速判断不会改变窗口状态
+            if _did_screenshot and was_minimized and session.hwnd and win32gui.IsWindow(session.hwnd):
                 try:
                     current_rect = win32gui.GetWindowRect(session.hwnd)
                     # 如果窗口当前是可见的（不在最小化位置），恢复最小化
