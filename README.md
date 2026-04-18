@@ -218,6 +218,7 @@ with WeChatClient(auto_connect=True) as wx:
 | 参数 | 类型 | 默认值 | 说明 |
 |-----|------|-------|------|
 | `verify_member_count` | bool | True | 启动时是否验证群成员数量一致性。设为 `False` 可跳过验证，加快启动速度 |
+| `ocr_debug_mode` | bool | False | OCR 调试模式。设为 `True` 会保存截图到临时目录，用于调试发送者识别问题 |
 
 ```python
 # 跳过成员数量验证，加快启动速度
