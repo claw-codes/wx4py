@@ -1682,12 +1682,38 @@ class WeChatGroupListener:
 
     def _run_loop(self) -> None:
         logger.info(f"开始监听群聊: {', '.join(self.groups)}")
+
+        # 启动完成后，最小化所有独立窗口和主窗口
+        self._minimize_all_windows()
+
         while not self._stop_event.is_set():
             now = time.time()
             for session in self._due_sessions(now):
                 self._poll_session(session)
             time.sleep(self.tick)
         logger.info("群聊监听已停止")
+
+    def _minimize_all_windows(self) -> None:
+        """最小化所有独立窗口和主窗口"""
+        import win32gui
+        import win32con
+
+        # 最小化所有独立窗口
+        for group, session in self.sessions.items():
+            try:
+                win32gui.ShowWindow(session.hwnd, win32con.SW_MINIMIZE)
+                logger.debug(f"已最小化独立窗口: {group}")
+            except Exception as e:
+                logger.warning(f"最小化独立窗口失败 {group}: {e}")
+
+        # 最小化主窗口
+        try:
+            main_hwnd = self.client.window.hwnd
+            if main_hwnd:
+                win32gui.ShowWindow(main_hwnd, win32con.SW_MINIMIZE)
+                logger.info("已最小化微信主窗口")
+        except Exception as e:
+            logger.warning(f"最小化主窗口失败: {e}")
 
     def _due_sessions(self, now: float) -> List[_ListenSession]:
         sessions = [
