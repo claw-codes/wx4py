@@ -213,6 +213,23 @@ with WeChatClient(auto_connect=True) as wx:
 
 **原理**：通过 OCR 截图识别消息上方的昵称，结合 MemberRegistry 昵称匹配获取微信ID。
 
+**参数说明**：
+
+| 参数 | 类型 | 默认值 | 说明 |
+|-----|------|-------|------|
+| `verify_member_count` | bool | True | 启动时是否验证群成员数量一致性。设为 `False` 可跳过验证，加快启动速度 |
+
+```python
+# 跳过成员数量验证，加快启动速度
+listener = WeChatGroupListener(
+    client=wx,
+    groups=["工作群", "项目群"],
+    member_registry=registry,
+    on_message=on_message,
+    verify_member_count=False,  # 跳过验证，直接使用缓存的成员信息
+)
+```
+
 ---
 
 ### 监听群消息并转发给指定联系人或群
@@ -390,6 +407,7 @@ with WeChatClient(auto_connect=True) as wx:
 - 需要安装 PaddleOCR：`pip install paddlepaddle paddleocr`
 - 首次监听会自动注册群成员（需要一些时间）
 - 成员信息保存在 `group_members.json`
+- 可通过 `verify_member_count=False` 跳过启动时的成员数量验证，加快启动速度
 
 </details>
 

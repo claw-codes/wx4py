@@ -1171,6 +1171,7 @@ class WeChatGroupListener:
         tick: float = 0.1,
         batch_size: int = 8,
         tail_size: int = 8,
+        verify_member_count: bool = True,
     ):
         self.client = client
         self.groups = list(dict.fromkeys(groups))
@@ -1183,6 +1184,7 @@ class WeChatGroupListener:
         self.tick = tick
         self.batch_size = batch_size
         self.tail_size = tail_size
+        self.verify_member_count = verify_member_count
         shared_registry = getattr(self.client, "outgoing_registry", None)
         self.outgoing_registry = shared_registry or OutgoingMessageRegistry(outgoing_ttl)
         self.sessions: Dict[str, _ListenSession] = {}
@@ -1383,14 +1385,22 @@ class WeChatGroupListener:
 
         # 检查是否已有注册信息
         existing = self.member_registry._members.get(group, {})
-        
+
         if len(existing) > 0:
+            # 如果关闭了成员数量验证，直接跳过
+            if not self.verify_member_count:
+                registered_with_wxid = sum(1 for v in existing.values() if v)
+                logger.info(
+                    f"群 '{group}' 已有 {len(existing)} 名成员注册（{registered_with_wxid} 名有微信ID），跳过验证"
+                )
+                return registered_with_wxid
+
             # 已有注册信息，验证成员数量是否一致
             try:
                 # 获取当前群的实际成员数量
                 actual_count = self.client.group_manager.get_group_member_count(group)
                 registered_count = len(existing)
-                
+
                 # 如果获取失败（返回负数或None），跳过验证
                 if not actual_count or actual_count < 0:
                     logger.warning(
@@ -1398,7 +1408,7 @@ class WeChatGroupListener:
                     )
                     registered_with_wxid = sum(1 for v in existing.values() if v)
                     return registered_with_wxid
-                
+
                 if actual_count != registered_count:
                     logger.info(
                         f"群 '{group}' 成员数量变化: 已注册 {registered_count} 名，实际 {actual_count} 名，重新注册..."
@@ -1635,6 +1645,15 @@ class WeChatGroupListener:
                     hwnd = _find_window_by_title(group, exclude_hwnd=main_hwnd)
                     if hwnd:
                         logger.info(f"成功打开独立窗口: {group} (hwnd={hwnd})")
+                        # 调整窗口到指定大小，确保 OCR 识别准确
+                        try:
+                            OCR_WINDOW_WIDTH = 675
+                            OCR_WINDOW_HEIGHT = 790
+                            rect = win32gui.GetWindowRect(hwnd)
+                            win32gui.SetWindowPos(hwnd, 0, rect[0], rect[1], OCR_WINDOW_WIDTH, OCR_WINDOW_HEIGHT, 0)
+                            logger.info(f"已调整独立窗口大小为 {OCR_WINDOW_WIDTH}x{OCR_WINDOW_HEIGHT}")
+                        except Exception as e:
+                            logger.warning(f"调整窗口大小失败: {e}")
                         return hwnd
                     time.sleep(0.3)
 
@@ -2066,12 +2085,12 @@ class WeChatGroupListener:
             # 查找消息内容的位置
             msg_bbox = None
             msg_candidates = []
-            # 归一化消息内容，用于匹配
-            norm_content = message_content.replace("\u2005", "").replace("\xa0", "").strip() if message_content else ""
+            # 归一化消息内容，用于匹配（去掉所有空白字符，因为OCR可能丢失空格）
+            norm_content = message_content.replace("\u2005", "").replace("\xa0", "").replace(" ", "").replace("\t", "").strip() if message_content else ""
             for text, confidence, bbox in texts:
                 if not message_content:
                     continue
-                norm_text = text.replace("\u2005", "").replace("\xa0", "").strip()
+                norm_text = text.replace("\u2005", "").replace("\xa0", "").replace(" ", "").replace("\t", "").strip()
                 # 精确匹配（OCR 识别的整行文本与消息内容一致）
                 if norm_content == norm_text:
                     msg_candidates.append((text, confidence, bbox, len(norm_text)))
