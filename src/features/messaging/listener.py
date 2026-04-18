@@ -1172,6 +1172,7 @@ class WeChatGroupListener:
         batch_size: int = 8,
         tail_size: int = 8,
         verify_member_count: bool = True,
+        ocr_debug_mode: bool = False,
     ):
         self.client = client
         self.groups = list(dict.fromkeys(groups))
@@ -1185,6 +1186,7 @@ class WeChatGroupListener:
         self.batch_size = batch_size
         self.tail_size = tail_size
         self.verify_member_count = verify_member_count
+        self.ocr_debug_mode = ocr_debug_mode
         shared_registry = getattr(self.client, "outgoing_registry", None)
         self.outgoing_registry = shared_registry or OutgoingMessageRegistry(outgoing_ttl)
         self.sessions: Dict[str, _ListenSession] = {}
@@ -1979,8 +1981,15 @@ class WeChatGroupListener:
             # 长消息在 OCR 中会被拆分成多个文本块，容易导致 center_x 误判
             # ============================================================
             try:
+                # 检查窗口是否最小化（最小化时 UIA 坐标不可靠，跳过快速判断）
+                try:
+                    win_rect = win32gui.GetWindowRect(target_hwnd)
+                    is_minimized = win_rect[0] < 0 or win_rect[1] < 0
+                except Exception:
+                    is_minimized = False
+
                 # 检查 UIA 坐标是否有效（窗口最小化时坐标可能为负）
-                if msg_rect.left >= 0 and msg_rect.right > msg_rect.left:
+                if not is_minimized and msg_rect.left >= 0 and msg_rect.right > msg_rect.left:
                     client_rect = win32gui.GetClientRect(target_hwnd)
                     client_left_screen, _ = win32gui.ClientToScreen(
                         target_hwnd, (client_rect[0], client_rect[1])
@@ -2038,12 +2047,18 @@ class WeChatGroupListener:
             temp_paths.append(full_path)  # 记录临时文件
             logger.debug(f"截图尺寸: {full_w}x{full_h}")
 
-            # 保存完整截图用于调试
+            # 读取截图
             from PIL import Image
             full_img = Image.open(full_path)
             timestamp = datetime.datetime.now().strftime('%H%M%S_%f')
-            full_debug_path = os.path.join(debug_dir, f'full_{timestamp}.png')
-            full_img.save(full_debug_path)
+
+            # 只在调试模式下保存调试图片
+            if self.ocr_debug_mode:
+                full_debug_path = os.path.join(debug_dir, f'full_{timestamp}.png')
+                full_img.save(full_debug_path)
+                ocr_image_path = full_debug_path
+            else:
+                ocr_image_path = full_path
 
             # ============================================================
             # 【新策略】使用OCR识别消息位置，然后判断左右
@@ -2051,20 +2066,37 @@ class WeChatGroupListener:
             # ============================================================
 
             # 检测是否是深色模式（微信深色模式背景是深色的）
+            # 只采样部分像素以加速检测
             pixels = list(full_img.getdata())
-            r_vals = [p[0] for p in pixels if len(p) >= 3]
+            sample_size = min(1000, len(pixels))  # 最多采样1000个像素
+            import random
+            sample_pixels = random.sample(pixels, sample_size) if len(pixels) > sample_size else pixels
+            r_vals = [p[0] for p in sample_pixels if len(p) >= 3]
             import statistics
             avg_r = statistics.mean(r_vals) if r_vals else 0
             is_dark_mode = avg_r < 100
 
             # 如果是深色模式，进行反色处理以便 OCR 更好地识别
-            ocr_image_path = full_debug_path
             if is_dark_mode:
                 try:
                     from PIL import ImageOps
                     rgb_img = full_img.convert('RGB')
                     inverted_img = ImageOps.invert(rgb_img)
-                    inverted_path = os.path.join(debug_dir, f'inverted_{timestamp}.png')
+                    if self.ocr_debug_mode:
+                        inverted_path = os.path.join(debug_dir, f'inverted_{timestamp}.png')
+                        inverted_img.save(inverted_path)
+                        ocr_image_path = inverted_path
+                        temp_paths.append(inverted_path)
+                    else:
+                        # 非调试模式，保存到临时文件
+                        import tempfile
+                        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
+                            inverted_img.save(f.name, 'PNG')
+                            ocr_image_path = f.name
+                            temp_paths.append(f.name)
+                    logger.info(f"深色模式检测，已生成反色图片")
+                except Exception as e:
+                    logger.warning(f"反色处理失败: {e}，使用原图")
                     inverted_img.save(inverted_path)
                     ocr_image_path = inverted_path
                     temp_paths.append(inverted_path)
