@@ -449,7 +449,16 @@ MESSAGE_CLASSES = {
     "mmui::ChatTextItemView",
     "mmui::ChatBubbleItemView",
 }
+# 图片消息 UIA 类名（实测新版微信）
+IMAGE_CLASSES = {
+    "mmui::ChatBubbleReferItemView",  # 图片消息（Name="图片"）
+    "mmui::ChatImageItemView",        # 旧版猜测（保留兼容）
+    "mmui::XImage",                   # 新版图片控件（非消息，但保留检测）
+}
 TIME_CLASS = "mmui::ChatItemView"
+
+# UIA 类名发现日志（记录所有遇到的非标准类名，用于发现图片/文件等消息类型）
+_logged_uia_classes = set()
 
 
 def parse_message_name(raw_name: str) -> Tuple[Optional[str], str]:
@@ -502,6 +511,9 @@ class MessageEvent:
 
     raw: object = None
     """原始 UI 控件对象，包含完整的消息项信息。"""
+
+    image_path: Optional[str] = None
+    """图片消息的本地保存路径（仅图片消息时有值）。"""
 
 
 @dataclass(frozen=True)
@@ -1014,6 +1026,8 @@ def _find_message_list(root):
                 cls = _safe_text(child, "ClassName")
                 if cls in MESSAGE_CLASSES:
                     score += 10
+                elif cls in IMAGE_CLASSES:
+                    score += 8  # 图片消息也计入评分
                 elif cls == TIME_CLASS:
                     score += 2
             if score:
@@ -1032,9 +1046,21 @@ def _read_visible_items(msg_list) -> List[_VisibleItem]:
     for child in _safe_children(msg_list):
         cls = _safe_text(child, "ClassName")
         name = _safe_text(child, "Name").strip()
-        if not name:
+        # 图片消息可能没有 Name 属性，先检查类名再决定是否跳过
+        if cls in IMAGE_CLASSES:
+            kind = "image"
+            sender_name = None
+        # mmui::Chat* 或 mmui::X* 类名但没有 Name 的元素（如图片、文件、语音等），作为潜在媒体消息处理
+        elif not name and cls and (cls.startswith("mmui::Chat") or cls.startswith("mmui::X")) and cls != TIME_CLASS:
+            # 记录发现的类名（每次都打印，方便调试）
+            if cls not in _logged_uia_classes:
+                _logged_uia_classes.add(cls)
+            print(f"[Listener] 发现无Name的媒体类: {cls}", flush=True)
+            kind = "image"
+            sender_name = None
+        elif not name:
             continue
-        if cls == TIME_CLASS:
+        elif cls == TIME_CLASS:
             kind = "time/system"
             sender_name = None
         elif cls in MESSAGE_CLASSES:
@@ -1042,6 +1068,10 @@ def _read_visible_items(msg_list) -> List[_VisibleItem]:
             # 解析消息，提取发送者昵称
             sender_name, _ = parse_message_name(name)
         else:
+            # 记录未处理的 UIA 类名，用于发现图片/文件/语音等消息类型
+            if cls and cls.startswith("mmui::Chat") and cls not in _logged_uia_classes:
+                _logged_uia_classes.add(cls)
+                print(f"[Listener] 发现新的 UIA 类名: {cls}, Name={name[:80]}", flush=True)
             continue
         items.append(
             _VisibleItem(
@@ -1173,6 +1203,7 @@ class WeChatGroupListener:
         tail_size: int = 8,
         verify_member_count: bool = True,
         ocr_debug_mode: bool = False,
+        image_save_base: Optional[str] = None,
     ):
         self.client = client
         self.groups = list(dict.fromkeys(groups))
@@ -1187,6 +1218,7 @@ class WeChatGroupListener:
         self.tail_size = tail_size
         self.verify_member_count = verify_member_count
         self.ocr_debug_mode = ocr_debug_mode
+        self.image_save_base = image_save_base
         shared_registry = getattr(self.client, "outgoing_registry", None)
         self.outgoing_registry = shared_registry or OutgoingMessageRegistry(outgoing_ttl)
         self.sessions: Dict[str, _ListenSession] = {}
@@ -1765,7 +1797,7 @@ class WeChatGroupListener:
             if item.key in session.seen:
                 continue
             session.seen.add(item.key)
-            if item.kind != "message":
+            if item.kind not in ("message", "image"):
                 continue
             if self.ignore_client_sent and self.outgoing_registry.should_ignore(session.group, item.name):
                 continue
@@ -1780,7 +1812,209 @@ class WeChatGroupListener:
 
         self._update_next_scan(session, added)
 
+    def _handle_image_message(self, session: _ListenSession, item: _VisibleItem) -> None:
+        """处理图片消息：识别发送者、截取图片区域并保存"""
+        import os
+        from datetime import datetime
+
+        print(f"[Listener] _handle_image_message 被调用, group={session.group}, item.kind={item.kind}", flush=True)
+
+        sender_name = None
+        sender_wxid = None
+        image_path = None
+        content = "[图片]"
+
+        # OCR 识别发送者昵称（复用已有的 OCR 流程）
+        ocr_sender = self._ocr_recognize_sender(session, item, content)
+
+        if ocr_sender:
+            if ocr_sender == "自己":
+                my_nickname = self.group_nicknames.get(session.group)
+                if my_nickname:
+                    sender_name = my_nickname
+                    if self.member_registry:
+                        sender_wxid = self.member_registry.get_wxid(session.group, my_nickname)
+            else:
+                sender_name = ocr_sender
+                if self.member_registry:
+                    sender_wxid = self.member_registry.get_wxid(session.group, sender_name)
+                    if not sender_wxid:
+                        fuzzy_result = self.member_registry.fuzzy_match_member(session.group, sender_name)
+                        if fuzzy_result:
+                            sender_name, sender_wxid = fuzzy_result
+
+        if not sender_name or (sender_name != self.group_nicknames.get(session.group) and not sender_wxid):
+            sender_name = "未知群友"
+            sender_wxid = None
+
+        # 尝试截取图片区域
+        try:
+            image_path = self._capture_image_region(session, item)
+        except Exception as e:
+            print(f"[Listener] 截取图片失败: {e}", flush=True)
+
+        logger.info(f"[{session.group}] {sender_name}: [图片] path={image_path or '无'}")
+
+        event = MessageEvent(
+            group=session.group,
+            content=content,
+            sender_name=sender_name,
+            sender_wxid=sender_wxid,
+            timestamp=time.time(),
+            group_nickname=self.group_nicknames.get(session.group),
+            is_at_me=False,
+            raw=item.control,
+            image_path=image_path,
+        )
+        try:
+            reply = self.on_message(event)
+        except Exception as exc:
+            logger.exception(f"图片消息回调执行失败: {session.group}: {exc}")
+            return
+
+        if self.auto_reply and reply and self._should_send_reply(event):
+            self.enqueue_reply(session.group, str(reply))
+
+    def _capture_image_region(self, session: _ListenSession, item: _VisibleItem) -> Optional[str]:
+        """截取图片消息的区域并保存到群记忆目录"""
+        try:
+            import win32gui
+            from PIL import Image
+            from datetime import datetime as dt
+
+            # 获取消息项的 BoundingRectangle
+            rect = item.control.BoundingRectangle
+            if not rect:
+                return None
+            msg_left, msg_top, msg_right, msg_bottom = rect.left, rect.top, rect.right, rect.bottom
+
+            # 检查尺寸
+            width = msg_right - msg_left
+            height = msg_bottom - msg_top
+            if width > 1200 or height > 1200 or width < 20 or height < 20:
+                return None
+
+            target_hwnd = session.hwnd
+
+            # 检查窗口是否最小化，如果是则恢复
+            was_minimized = False
+            try:
+                win_rect = win32gui.GetWindowRect(target_hwnd)
+                if win_rect[0] < 0 or win_rect[1] < 0:
+                    was_minimized = True
+                    import win32con
+                    import ctypes
+                    user32 = ctypes.windll.user32
+
+                    # 恢复窗口
+                    win32gui.ShowWindow(target_hwnd, win32con.SW_RESTORE)
+                    import time
+                    time.sleep(0.3)
+
+                    # 移到屏幕右下角
+                    screen_w = user32.GetSystemMetrics(0)
+                    screen_h = user32.GetSystemMetrics(1)
+                    import win32con
+                    w, h = 675, 790
+                    win32gui.SetWindowPos(target_hwnd, 0, screen_w - w - 5, screen_h - h - 5, w, h, 0)
+                    time.sleep(0.3)
+
+                    # 重新获取 BoundingRectangle（窗口移动后坐标变了）
+                    rect = item.control.BoundingRectangle
+                    if rect:
+                        msg_left, msg_top, msg_right, msg_bottom = rect.left, rect.top, rect.right, rect.bottom
+            except Exception:
+                pass
+
+            try:
+                # 使用 _capture_window_full 截取整个窗口（已验证能工作）
+                full_result = _capture_window_full(target_hwnd)
+                if not full_result:
+                    return None
+
+                full_path = full_result[0]  # (path, width, height)
+                if not full_path or not os.path.exists(full_path):
+                    return None
+
+                full_img = Image.open(full_path)
+
+                # 计算图片消息在窗口客户区中的相对位置
+                try:
+                    client_rect = win32gui.GetClientRect(target_hwnd)
+                    client_left, client_top = win32gui.ClientToScreen(target_hwnd, (client_rect[0], client_rect[1]))
+                except Exception:
+                    return None
+
+                # 裁剪出图片消息区域
+                crop_left = msg_left - client_left
+                crop_top = msg_top - client_top
+                crop_right = msg_right - client_left
+                crop_bottom = msg_bottom - client_top
+
+                # 边界检查
+                img_w, img_h = full_img.size
+                crop_left = max(0, crop_left)
+                crop_top = max(0, crop_top)
+                crop_right = min(img_w, crop_right)
+                crop_bottom = min(img_h, crop_bottom)
+
+                if crop_right - crop_left < 20 or crop_bottom - crop_top < 20:
+                    return None
+
+                cropped = full_img.crop((crop_left, crop_top, crop_right, crop_bottom))
+
+                # 保存到群记忆目录
+                base_path = self._get_group_memory_base_path(session.group)
+                if not base_path:
+                    return None
+
+                images_dir = os.path.join(base_path, "images")
+                os.makedirs(images_dir, exist_ok=True)
+
+                timestamp = dt.now().strftime("%Y%m%d_%H%M%S")
+                filepath = os.path.join(images_dir, f"{timestamp}.png")
+                cropped.save(filepath, "PNG")
+                print(f"[Listener] 图片已保存: {filepath} ({cropped.size[0]}x{cropped.size[1]})", flush=True)
+                return filepath
+
+            finally:
+                # 恢复窗口最小化状态
+                if was_minimized:
+                    try:
+                        import win32con
+                        win32gui.ShowWindow(target_hwnd, win32con.SW_MINIMIZE)
+                    except Exception:
+                        pass
+
+        except Exception as e:
+            print(f"[Listener] 截取图片异常: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def _get_group_memory_base_path(self, group_name: str) -> Optional[str]:
+        """根据群名获取群记忆目录路径（用于保存图片截图）"""
+        print(f"[Listener] _get_group_memory_base_path 被调用, group_name={group_name}", flush=True)
+        print(f"[Listener] self.image_save_base={self.image_save_base}", flush=True)
+        try:
+            if self.image_save_base:
+                # 使用外部传入的 base_path，构建 groups/{group}/memory/ 路径
+                memory_path = os.path.join(self.image_save_base, "groups", group_name, "memory")
+                os.makedirs(memory_path, exist_ok=True)
+                print(f"[Listener] memory_path={memory_path}", flush=True)
+                return memory_path
+            else:
+                print("[Listener] image_save_base 为空，无法构建路径", flush=True)
+        except Exception as e:
+            print(f"[Listener] _get_group_memory_base_path 异常: {e}", flush=True)
+        return None
+
     def _handle_message(self, session: _ListenSession, item: _VisibleItem) -> None:
+        # 图片消息处理
+        if item.kind == "image":
+            self._handle_image_message(session, item)
+            return
+
         # 解析消息内容（可能包含 @发送者 格式的前缀）
         _, content = parse_message_name(item.name)
 
