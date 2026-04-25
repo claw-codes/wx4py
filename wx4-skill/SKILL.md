@@ -378,6 +378,79 @@ with WeChatClient(auto_connect=True) as wx:
 - 自动回复通过发送队列串行执行，避免多个群同时回复时抢占窗口。
 - 本库发送的消息会自动记录，避免机器人监听到自己的回复后再次触发。
 
+### 6. 群聊消息发送者识别（OCR）
+
+微信 4.x 的 UI Automation 不直接暴露发送者信息，但 wx4py 通过 **OCR 截图识别 + MemberRegistry 昵称匹配** 的方式，可以识别群聊消息的发送者昵称和微信ID。
+
+#### 基本使用
+
+```python
+from wx4py import MemberRegistry, WeChatClient
+from wx4py.features.messaging.listener import WeChatGroupListener
+
+# 创建成员注册表
+registry = MemberRegistry()
+registry.load_from_file("group_members.json")
+
+def on_message(event):
+    if event.sender_name:
+        if event.sender_wxid:
+            print(f"[{event.group}] {event.sender_name} ({event.sender_wxid}): {event.content}")
+        else:
+            print(f"[{event.group}] {event.sender_name}: {event.content}")
+    else:
+        print(f"[{event.group}] 未知发送者: {event.content}")
+
+with WeChatClient(auto_connect=True) as wx:
+    listener = WeChatGroupListener(
+        client=wx,
+        groups=["工作群", "项目群"],
+        member_registry=registry,
+        on_message=on_message,
+    )
+    listener.start(block=True)
+```
+
+#### 结合 AI 自动回复（带发送者识别）
+
+```python
+from wx4py import MemberRegistry, WeChatClient
+from wx4py.features.messaging.listener import WeChatGroupListener
+
+registry = MemberRegistry()
+registry.load_from_file("group_members.json")
+
+def reply_with_sender(event):
+    if not event.is_at_me:
+        return ""
+    
+    # 可以根据发送者做个性化回复
+    sender = event.sender_name or "有人"
+    content = event.content
+    if event.group_nickname:
+        content = content.replace(f"@{event.group_nickname}", "").strip()
+    
+    return f"{sender}，收到你的消息：{content}"
+
+with WeChatClient(auto_connect=True) as wx:
+    listener = WeChatGroupListener(
+        client=wx,
+        groups=["工作群"],
+        member_registry=registry,
+        on_message=reply_with_sender,
+        auto_reply=True,
+        reply_on_at=True,
+    )
+    listener.start(block=True)
+```
+
+**注意事项**：
+- 需要安装 PaddleOCR：`pip install paddlepaddle paddleocr`
+- 首次监听会自动注册群成员（点击头像获取微信ID，需要成员公开微信ID）
+- 成员信息保存在 `group_members.json`
+- 如果发送者未注册微信ID，`sender_wxid` 为 None
+- 自己发送的消息会被识别为 `sender_name="自己"`
+
 ## 使用模式
 
 ### 推荐：使用上下文管理器
@@ -470,7 +543,7 @@ with WeChatClient() as wx:
 - 仅支持 Windows 系统
 - 需要微信客户端已登录
 - 操作期间不要手动操作微信窗口
-- 受微信 UIA 限制，聊天记录无法获取发送者姓名
+- 发送者识别需要安装 PaddleOCR（`pip install paddlepaddle paddleocr`）
 
 ### 最佳实践
 - 使用上下文管理器确保连接正确释放
@@ -538,6 +611,7 @@ except Exception as e:
 | 监听群消息并转发 | `process_groups(groups, [ForwardRuleHandler(rules)], block=True)` | `wx.process_groups(["群1"], [ForwardRuleHandler(rules)], block=True)` |
 | 自动回复群聊 | `AsyncCallbackHandler(reply_func, auto_reply=True)` | `AsyncCallbackHandler(reply, auto_reply=True, reply_on_at=True)` |
 | AI 自动回复 | `AIResponder(ai_client, context_size=8)` | `AsyncCallbackHandler(AIResponder(ai, context_size=8, reply_on_at=True), auto_reply=True)` |
+| 发送者识别 | `WeChatGroupListener(member_registry=registry)` | `WeChatGroupListener(wx, groups, member_registry=registry, on_message=handler)` |
 
 ## 常见问题
 

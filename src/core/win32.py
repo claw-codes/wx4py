@@ -146,10 +146,14 @@ def _wechat_window_score(hwnd: int, title: str, class_name: str, exe_path: str) 
     if exe_name == "wechatappex.exe":
         score -= 200
 
-    if class_name.startswith("Qt"):
+    # 关键修复：区分主窗口和独立窗口
+    # 主窗口标题通常为“微信”，独立窗口标题为群名/联系人名
+    if title == "微信" or title.startswith("微信"):
+        score += 200  # 主窗口最高优先级
+    elif class_name.startswith("Qt") and title and "微信" not in title:
+        score -= 50  # 独立窗口降低优先级
+    elif class_name.startswith("Qt"):
         score += 30
-    if "微信" in title:
-        score += 10
 
     if not win32gui.IsWindowVisible(hwnd):
         score -= 20
@@ -243,7 +247,12 @@ def restart_wechat_process(hwnd: int) -> bool:
 
 def bring_window_to_front(hwnd: int) -> bool:
     """
-    将窗口置于前台，如果已最小化则恢复。
+    将窗口置于前台。
+
+    处理三种情况：
+    1. 窗口已最小化 → SW_RESTORE 恢复
+    2. 窗口隐藏到托盘（SW_HIDE 状态） → 先 SW_SHOW 再 SW_RESTORE
+    3. 窗口正常显示 → 直接 SetForegroundWindow
 
     Args:
         hwnd: 窗口句柄
@@ -252,7 +261,11 @@ def bring_window_to_front(hwnd: int) -> bool:
         bool: 成功时返回 True
     """
     try:
-        # 显示窗口
+        # 如果窗口不可见（隐藏到托盘），先 SW_SHOW 使其可见
+        if not win32gui.IsWindowVisible(hwnd):
+            win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
+            time.sleep(0.15)
+        # 恢复窗口（处理最小化状态）
         win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
         # 置于前台
         win32gui.SetForegroundWindow(hwnd)
@@ -274,6 +287,155 @@ def get_window_class(hwnd: int) -> str:
 def is_window_visible(hwnd: int) -> bool:
     """检查窗口是否可见"""
     return win32gui.IsWindowVisible(hwnd) != 0
+
+
+def _purge_ghost_tray_icons():
+    """
+    清理系统通知区域中的幽灵图标。
+
+    微信多次启动/关闭后，通知区域可能残留失效的"幽灵图标"（ghost icons）。
+    正常情况下，当用户鼠标扫过通知区域时 Windows Explorer 会自动清理这些图标，
+    但如果用户使用 myDockFinder 等工具隐藏了 Windows 任务栏，鼠标永远不会
+    扫过通知区域，幽灵图标就会不断累积。
+
+    此方法通过向通知区域的 ToolbarWindow32 控件发送 WM_MOUSEMOVE 消息来
+    模拟鼠标扫过，触发 Windows Explorer 的幽灵图标清理机制。
+    """
+    WM_MOUSEMOVE = 0x0200
+    WM_MOUSELEAVE = 0x02A3
+
+    def _sweep_toolbar(toolbar_hwnd):
+        if not toolbar_hwnd:
+            return
+        try:
+            rect = win32gui.GetClientRect(toolbar_hwnd)
+            w = rect[2]
+            h = rect[3]
+            if w <= 0 or h <= 0:
+                return
+            y = h // 2
+            # 每 8 像素发送一次 WM_MOUSEMOVE，模拟鼠标从左到右扫过
+            for x in range(0, w + 1, 8):
+                lParam = (y << 16) | (x & 0xFFFF)
+                try:
+                    win32gui.SendMessage(toolbar_hwnd, WM_MOUSEMOVE, 0, lParam)
+                except Exception:
+                    pass
+            # 发送 WM_MOUSELEAVE 完成清理
+            try:
+                win32gui.SendMessage(toolbar_hwnd, WM_MOUSELEAVE, 0, 0)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    # 清理主通知区域
+    shell_tray = win32gui.FindWindow('Shell_TrayWnd', None)
+    if shell_tray:
+        tray_notify = win32gui.FindWindowEx(shell_tray, 0, 'TrayNotifyWnd', None)
+        if tray_notify:
+            sys_pager = win32gui.FindWindowEx(tray_notify, 0, 'SysPager', None)
+            if sys_pager:
+                toolbar = win32gui.FindWindowEx(
+                    sys_pager, 0, 'ToolbarWindow32', None
+                )
+                _sweep_toolbar(toolbar)
+
+    # 清理溢出区域
+    overflow = win32gui.FindWindow('NotifyIconOverflowWindow', None)
+    if overflow:
+        toolbar = win32gui.FindWindowEx(
+            overflow, 0, 'ToolbarWindow32', None
+        )
+        _sweep_toolbar(toolbar)
+
+    # 给 Explorer 一点时间完成清理
+    time.sleep(0.3)
+
+
+def activate_wechat_via_tray_icon() -> bool:
+    """
+    通过系统通知区域的微信托盘图标唤醒微信窗口。
+
+    当微信窗口被关闭（隐藏到系统托盘）时，单纯的 ShowWindow 无法
+    恢复 Qt 辅助功能树。此方法通过 UIA 查找通知区域中的微信图标
+    并调用 Invoke 操作，等效于用户手动点击托盘图标，从而触发微信
+    内部的窗口显示逻辑，使 UIA 控件树正确恢复。
+
+    此方法不依赖键盘快捷键，也不依赖任务栏的可见性（兼容
+    myDockFinder 等隐藏任务栏的工具），因为底层 Shell_TrayWnd
+    窗口始终存在。
+
+    在查找微信图标之前，会先清理通知区域的幽灵图标（ghost icons），
+    避免 invoke 到失效的残留图标上。
+
+    Returns:
+        bool: 成功触发托盘图标点击返回 True
+    """
+    # 延迟导入，避免循环依赖（uiautomation 模块较重）
+    from ..core import uiautomation as uia
+
+    # 先清理幽灵图标，确保后续查找到的是真实有效的微信图标
+    _purge_ghost_tray_icons()
+
+    def _find_wechat_icon(ctrl, depth=0):
+        """递归查找名称包含'微信'的按钮控件"""
+        if depth > 8:
+            return None
+        try:
+            name = ctrl.Name or ''
+            if '微信' in name and ctrl.ControlTypeName == 'ButtonControl':
+                return ctrl
+        except Exception:
+            pass
+        try:
+            for ch in ctrl.GetChildren():
+                result = _find_wechat_icon(ch, depth + 1)
+                if result:
+                    return result
+        except Exception:
+            pass
+        return None
+
+    def _invoke_icon(icon):
+        """尝试多种方式触发托盘图标"""
+        # 方式1：InvokePattern
+        try:
+            pat = icon.GetInvokePattern()
+            if pat:
+                pat.Invoke()
+                return True
+        except Exception:
+            pass
+        # 方式2：Click
+        try:
+            icon.Click()
+            return True
+        except Exception:
+            pass
+        return False
+
+    # 在主通知区域精确查找（限定在 TrayNotifyWnd 下，避免匹配任务栏按钮）
+    shell_tray = win32gui.FindWindow('Shell_TrayWnd', None)
+    if shell_tray:
+        tray_notify = win32gui.FindWindowEx(
+            shell_tray, 0, 'TrayNotifyWnd', None
+        )
+        if tray_notify:
+            tray_root = uia.ControlFromHandle(tray_notify)
+            icon = _find_wechat_icon(tray_root)
+            if icon and _invoke_icon(icon):
+                return True
+
+    # 在溢出区域查找
+    overflow = win32gui.FindWindow('NotifyIconOverflowWindow', None)
+    if overflow:
+        of_root = uia.ControlFromHandle(overflow)
+        icon = _find_wechat_icon(of_root)
+        if icon and _invoke_icon(icon):
+            return True
+
+    return False
 
 
 def minimize_window(hwnd: int) -> bool:

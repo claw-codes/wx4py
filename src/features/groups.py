@@ -8,7 +8,7 @@ from typing import Optional
 
 from .base import BasePage
 from ..utils.logger import get_logger
-from ..core.uiautomation import ControlFromHandle as control_from_handle, GetFocusedControl, PatternId, ToggleState
+from ..core.uiautomation import ControlFromHandle as control_from_handle, GetFocusedControl, PatternId, ToggleState, WalkControl
 
 logger = get_logger(__name__)
 
@@ -215,6 +215,35 @@ class GroupManager(BasePage):
         time.sleep(0.1)
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
 
+    def _double_click_at_position(self, x: int, y: int):
+        """在屏幕坐标处双击。"""
+        logger.debug(f"在屏幕位置 ({x}, {y}) 双击")
+        win32api.SetCursorPos((x, y))
+        time.sleep(0.2)
+        # 第一次点击
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+        time.sleep(0.1)
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+        time.sleep(0.1)
+        # 第二次点击
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+        time.sleep(0.1)
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+
+    def _right_click_at_position(self, x: int, y: int):
+        """在屏幕坐标处右键单击。"""
+        logger.debug(f"在屏幕位置 ({x}, {y}) 右键单击")
+        win32api.SetCursorPos((x, y))
+        time.sleep(0.2)
+        win32api.mouse_event(win32con.MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
+        time.sleep(0.1)
+        win32api.mouse_event(win32con.MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
+
+    def _get_group_display_name(self, group_name: str) -> str:
+        """获取群的显示名称（用于比较窗口名称）。"""
+        # 群名称通常就是显示名称
+        return group_name
+
     def _find_and_activate_button(self, popup, button_name: str) -> bool:
         """
         通过 Tab 导航查找按钮并用 Enter 键激活。
@@ -323,6 +352,616 @@ class GroupManager(BasePage):
         members = sorted(all_members)
         logger.info(f"从群 {group_name} 收集到 {len(members)} 名成员")
         return members
+
+    def get_group_member_count(self, group_name: str) -> int:
+        """
+        快速获取群成员数量（不获取详细信息）。
+
+        通过滚动成员列表统计成员数量，比 get_group_members 更快。
+
+        Args:
+            group_name: 群名称
+
+        Returns:
+            int: 群成员数量，失败返回 -1
+        """
+        logger.info(f"获取群成员数量: {group_name}")
+
+        # 第1步：打开群详情面板并聚焦
+        info_view = self._open_and_focus_group_detail(group_name)
+        if not info_view:
+            logger.error("打开群详情面板失败")
+            return -1
+
+        time.sleep(0.5)
+
+        # 第2步：获取成员列表控件
+        member_list = self._get_member_list()
+        if not member_list:
+            logger.error("获取成员列表失败")
+            return -1
+
+        # 第3步：滚动到顶部
+        self._scroll_list(member_list, delta=120 * 10, steps=5, step_delay=0.1, settle_time=0.5)
+        time.sleep(0.5)
+
+        # 第4步：统计所有成员（只统计数量，不保存详细信息）
+        all_members = set()
+        no_new_count = 0
+
+        while no_new_count < 5:
+            current = set()
+            try:
+                for child in member_list.GetChildren():
+                    try:
+                        if child.ClassName == 'mmui::ChatMemberCell':
+                            name = child.Name or ""
+                            if name:
+                                current.add(name)
+                    except:
+                        pass
+            except:
+                pass
+
+            new = current - all_members
+            if new:
+                all_members.update(new)
+                no_new_count = 0
+            else:
+                no_new_count += 1
+
+            # 每次滚动一行
+            self._scroll_list(member_list, delta=-120, steps=1, step_delay=0.0, settle_time=0.4)
+
+        # 关闭群详情面板（只按一次 ESC，避免关闭独立窗口）
+        self._close_popup()
+
+        count = len(all_members)
+        logger.info(f"群 '{group_name}' 成员数量: {count}")
+        return count
+
+    def get_all_members_wxid(self, group_name: str) -> dict:
+        """
+        一次性获取群所有成员的昵称和微信ID。
+
+        打开群详情后依次遍历每个成员，点击资料卡获取微信ID。
+        效率比单独调用 get_member_wxid 高很多。
+
+        Args:
+            group_name: 群名称
+
+        Returns:
+            dict: {昵称: 微信ID} 的字典，微信ID可能为空字符串（未加好友的情况）
+        """
+        logger.info(f"开始获取群 '{group_name}' 所有成员的微信ID...")
+
+        result = {}
+
+        # 第1步：打开群详情面板并聚焦
+        info_view = self._open_and_focus_group_detail(group_name)
+        if not info_view:
+            logger.error("打开群详情面板失败")
+            return result
+
+        time.sleep(0.5)
+
+        # 第2步：获取成员列表控件
+        member_list = self._get_member_list()
+        if not member_list:
+            logger.error("获取成员列表失败")
+            return result
+
+        # 第3步：滚动到顶部
+        self._scroll_list(member_list, delta=120 * 10, steps=5, step_delay=0.1, settle_time=0.5)
+        time.sleep(1)
+
+        # 第4步：收集所有可见成员控件（按位置排序）
+        all_member_ctrls = {}  # {昵称: 控件}
+        no_new_count = 0
+
+        while no_new_count < 5:
+            current_ctrls = {}
+            try:
+                children = member_list.GetChildren()
+                for child in children:
+                    try:
+                        if child.ClassName == 'mmui::ChatMemberCell':
+                            name = child.Name or ""
+                            if name and name not in all_member_ctrls:
+                                rect = child.BoundingRectangle
+                                if rect:
+                                    current_ctrls[name] = child
+                    except:
+                        pass
+            except:
+                pass
+
+            if current_ctrls:
+                all_member_ctrls.update(current_ctrls)
+                no_new_count = 0
+            else:
+                no_new_count += 1
+
+            # 每次滚动一行
+            self._scroll_list(member_list, delta=-120, steps=1, step_delay=0.0, settle_time=0.6)
+
+        logger.info(f"找到 {len(all_member_ctrls)} 名群成员，开始依次获取微信ID...")
+
+        # 第5步：依次点击每个成员获取微信ID
+        # 需要重新滚动并按顺序处理
+        member_names = sorted(all_member_ctrls.keys())
+
+        for i, member_name in enumerate(member_names):
+            try:
+                # 查找该成员控件（可能需要滚动）
+                target_ctrl = self._find_member_in_list(member_list, member_name)
+                if not target_ctrl:
+                    logger.warning(f"未找到成员控件: {member_name}")
+                    result[member_name] = ""  # 即使找不到控件也注册昵称
+                    continue
+
+                # 点击成员打开资料卡
+                wxid = self._click_and_get_wxid(target_ctrl, member_name)
+                result[member_name] = wxid or ""
+
+                if wxid:
+                    logger.info(f"成员 [{i+1}/{len(member_names)}]: {member_name} -> {wxid}")
+                else:
+                    logger.info(f"成员 [{i+1}/{len(member_names)}]: {member_name} (微信ID未公开)")
+
+                time.sleep(0.3)
+
+            except Exception as e:
+                logger.warning(f"获取成员 {member_name} 微信ID失败: {e}")
+                result[member_name] = ""  # 失败也注册昵称
+
+        # 关闭群详情面板（只按一次 ESC，避免关闭独立窗口）
+        self._close_popup()
+
+        logger.info(f"完成注册，共 {len(result)} 名成员，其中 {sum(1 for v in result.values() if v)} 名获取到微信ID")
+        return result
+
+    def _find_member_in_list(self, member_list, member_name: str, max_scroll: int = 30):
+        """在成员列表中查找指定成员控件。"""
+        # 先滚动到顶部
+        self._scroll_list(member_list, delta=120 * 10, steps=5, step_delay=0.1, settle_time=0.5)
+        time.sleep(0.5)
+
+        clean_name = member_name.strip()
+
+        for _ in range(max_scroll):
+            try:
+                children = member_list.GetChildren()
+                for child in children:
+                    try:
+                        if child.ClassName == 'mmui::ChatMemberCell':
+                            child_name = child.Name or ""
+                            if clean_name and clean_name in child_name:
+                                return child
+                    except:
+                        pass
+            except:
+                pass
+
+            # 向下滚动
+            self._scroll_list(member_list, delta=-120, steps=1, step_delay=0.1, settle_time=0.3)
+
+        return None
+
+    def _click_and_get_wxid(self, target_ctrl, member_name: str) -> Optional[str]:
+        """点击成员控件并从资料卡获取微信ID。"""
+        rect = target_ctrl.BoundingRectangle
+        if not rect:
+            return None
+
+        center_x = (rect.left + rect.right) // 2
+        center_y = (rect.top + rect.bottom) // 2
+
+        logger.info(f"点击成员 {member_name} at ({center_x}, {center_y})")
+
+        # 尝试右键菜单
+        self._right_click_at_position(center_x, center_y)
+        time.sleep(0.8)
+
+        # 查找右键菜单
+        context_menu = None
+        for pattern in ['mmui::CPopupMenu', 'mmui::CMenu', 'mmui::PopupMenu']:
+            try:
+                menu = self.root.WindowControl(ClassName=pattern)
+                if menu.Exists(maxSearchSeconds=0.3):
+                    context_menu = menu
+                    logger.debug(f"找到右键菜单: {pattern}")
+                    break
+            except:
+                pass
+
+        profile_opened = False
+
+        if context_menu:
+            # 查找"查看个人资料"选项
+            found_profile_option = False
+            for ctrl, depth in WalkControl(context_menu, includeTop=False, maxDepth=5):
+                try:
+                    name = ctrl.Name or ""
+                    if "查看个人资料" in name or "查看资料" in name:
+                        logger.info(f"找到'{name}'选项，点击")
+                        ctrl.Click(simulateMove=False)
+                        time.sleep(1.5)
+                        profile_opened = True
+                        found_profile_option = True
+                        break
+                except:
+                    pass
+
+            if not found_profile_option:
+                logger.debug("右键菜单中没有找到'查看个人资料'选项")
+                # 关闭菜单，尝试直接单击
+                self._close_popup()
+                time.sleep(0.3)
+        else:
+            logger.debug("未找到右键菜单，尝试直接单击")
+
+        if not profile_opened:
+            # 直接单击打开资料卡
+            self._click_at_position(center_x, center_y)
+            time.sleep(1.5)
+
+        # 查找资料卡窗口（多种方式）
+        profile_card = None
+        profile_patterns = [
+            'mmui::ProfileUniquePop',
+            'mmui::ContactProfileView',
+            'mmui::ProfileCardView',
+            'mmui::SessionProfileFrame',
+        ]
+
+        for pattern in profile_patterns:
+            try:
+                ctrl = self.root.WindowControl(ClassName=pattern)
+                if ctrl.Exists(maxSearchSeconds=0.5):
+                    profile_card = ctrl
+                    logger.info(f"找到资料卡窗口: {pattern}")
+                    break
+            except:
+                pass
+
+        # 如果没有找到资料卡，可能打开了私聊窗口
+        if not profile_card:
+            logger.debug("未找到资料卡窗口，检查是否打开了私聊窗口或详情面板")
+            # 尝试从私聊窗口或详情面板获取微信ID
+            wxid = self._get_wxid_from_chat_window(member_name)
+            self._close_popup()  # 关闭窗口
+            return wxid
+
+        # 从资料卡中提取微信号
+        # 微信号不一定是 wxid_ 开头，需要找"微信号："标签后面的文本
+        wxid = None
+        try:
+            # 方法1: 找"微信号："标签，然后取下一个 ContactProfileTextView 的值
+            found_label = False
+            for ctrl, depth in WalkControl(profile_card, includeTop=False, maxDepth=15):
+                try:
+                    ctrl_name = ctrl.Name or ""
+                    ctrl_class = ctrl.ClassName or ""
+                    
+                    # 找到"微信号："标签
+                    if "微信号" in ctrl_name:
+                        found_label = True
+                        logger.debug(f"找到微信号标签: '{ctrl_name}'")
+                        continue
+                    
+                    # 标签后面的第一个 ContactProfileTextView 就是微信号
+                    if found_label and ctrl_class == 'mmui::ContactProfileTextView':
+                        wxid = ctrl_name.strip()
+                        logger.info(f"找到微信号: {wxid}")
+                        break
+                except:
+                    pass
+
+            # 方法2: 如果没找到，尝试找"微信号："标签的兄弟控件
+            if not wxid:
+                # 遍历查找包含"微信号："的 XTextView，然后找同一父容器中的 ContactProfileTextView
+                for ctrl, depth in WalkControl(profile_card, includeTop=False, maxDepth=15):
+                    try:
+                        ctrl_name = ctrl.Name or ""
+                        if "微信号" in ctrl_name:
+                            # 获取父容器
+                            parent = ctrl.GetParentControl()
+                            if parent:
+                                # 遍历父容器的子控件
+                                for child in parent.GetChildren():
+                                    child_class = child.ClassName or ""
+                                    child_name = child.Name or ""
+                                    if child_class == 'mmui::ContactProfileTextView' and child_name:
+                                        # 确保不是标签本身
+                                        if "微信号" not in child_name:
+                                            wxid = child_name.strip()
+                                            logger.info(f"通过兄弟控件找到微信号: {wxid}")
+                                            break
+                            if wxid:
+                                break
+                    except:
+                        pass
+        except Exception as e:
+            logger.error(f"提取微信号失败: {e}")
+
+        # 关闭资料卡
+        self._close_popup()
+        time.sleep(0.3)
+
+        if not wxid:
+            logger.warning(f"未能在资料卡中找到 {member_name} 的微信号")
+
+        return wxid
+
+    def _get_wxid_from_chat_window(self, expected_name: str) -> Optional[str]:
+        """从私聊窗口或详情面板获取微信ID（当打开的是私聊而非资料卡时）。"""
+        try:
+            # 检查窗口标题
+            window_name = self.root.Name or ""
+            logger.debug(f"当前窗口标题: {window_name}")
+
+            # 尝试直接在当前窗口中查找微信号（找"微信号："标签后面的文本）
+            found_label = False
+            for ctrl, depth in WalkControl(self.root, includeTop=False, maxDepth=20):
+                try:
+                    ctrl_name = ctrl.Name or ""
+                    ctrl_class = ctrl.ClassName or ""
+                    
+                    if "微信号" in ctrl_name:
+                        found_label = True
+                        continue
+                    
+                    if found_label and ctrl_class == 'mmui::ContactProfileTextView':
+                        wxid = ctrl_name.strip()
+                        logger.info(f"在当前窗口找到微信号: {wxid}")
+                        return wxid
+                except:
+                    pass
+
+            # 如果当前窗口是私聊窗口，尝试打开详情面板
+            if expected_name in window_name or window_name != "微信":
+                logger.debug(f"可能打开了私聊窗口: {window_name}")
+
+                # 尝试点击"聊天信息"按钮打开详情面板
+                for btn_name in ['聊天信息', '信息', '详情']:
+                    try:
+                        btn = self.root.ButtonControl(Name=btn_name)
+                        if btn.Exists(maxSearchSeconds=0.3):
+                            logger.info(f"点击'{btn_name}'按钮")
+                            btn.Click(simulateMove=False)
+                            time.sleep(1.5)
+                            break
+                    except:
+                        pass
+
+                # 在详情面板中查找微信号（同样的逻辑）
+                found_label = False
+                for ctrl, depth in WalkControl(self.root, includeTop=False, maxDepth=20):
+                    try:
+                        ctrl_name = ctrl.Name or ""
+                        ctrl_class = ctrl.ClassName or ""
+                        
+                        if "微信号" in ctrl_name:
+                            found_label = True
+                            continue
+                        
+                        if found_label and ctrl_class == 'mmui::ContactProfileTextView':
+                            wxid = ctrl_name.strip()
+                            logger.info(f"从详情面板找到微信号: {wxid}")
+                            return wxid
+                    except:
+                        pass
+
+        except Exception as e:
+            logger.debug(f"从私聊窗口获取微信ID失败: {e}")
+
+        return None
+
+    def get_member_wxid(self, group_name: str, member_name: str) -> Optional[str]:
+        """
+        获取群成员的微信ID。
+
+        通过点击成员头像打开资料卡，从资料卡中提取微信号。
+
+        注意：如果要获取多个成员的微信ID，建议使用 get_all_members_wxid 方法，
+        它会一次性打开群详情后遍历所有成员，效率更高。
+
+        Args:
+            group_name: 群名称
+            member_name: 成员昵称
+
+        Returns:
+            Optional[str]: 成员的微信ID（如 wxid_xxx），如果未找到返回 None
+        """
+        logger.info(f"获取成员微信ID: {member_name} 在群 {group_name}")
+
+        # 第1步：打开群详情面板并聚焦
+        info_view = self._open_and_focus_group_detail(group_name)
+        if not info_view:
+            logger.error("打开群详情面板失败")
+            return None
+
+        time.sleep(0.5)
+
+        # 第2步：获取成员列表
+        member_list = self._get_member_list()
+        if not member_list:
+            logger.error("获取成员列表失败")
+            return None
+
+        # 第3步：滚动到可见区域（确保目标成员可见）
+        # 先滚动到顶部
+        self._scroll_list(member_list, delta=120 * 10, steps=5, step_delay=0.1, settle_time=0.5)
+
+        time.sleep(1)  # 额外等待UI更新
+
+        # 第4步：查找目标成员
+        target_ctrl = None
+        max_scroll_attempts = 30  # 增加滚动次数
+        scroll_count = 0
+
+        # 清理昵称中的空白字符
+        clean_name = member_name.strip()
+        logger.info(f"正在查找成员: '{clean_name}'")
+
+        while scroll_count < max_scroll_attempts:
+            # 在当前可见的成员中查找
+            for child in member_list.GetChildren():
+                try:
+                    if child.ClassName == 'mmui::ChatMemberCell':
+                        child_name = child.Name or ""
+                        # 使用部分匹配，包含目标昵称即可
+                        if clean_name and clean_name in child_name:
+                            target_ctrl = child
+                            logger.info(f"找到成员: '{child_name}' (目标: '{clean_name}')")
+                            break
+                except:
+                    pass
+
+            if target_ctrl:
+                break
+
+            # 未找到，向上滚动一行
+            logger.debug(f"滚动第 {scroll_count + 1} 次，查找: '{clean_name}'")
+            self._scroll_list(member_list, delta=-120, steps=1, step_delay=0.1, settle_time=0.5)
+            scroll_count += 1
+            time.sleep(0.2)  # 额外等待
+
+        if not target_ctrl:
+            logger.error(f"未在成员列表中找到: {member_name}")
+            return None
+
+        # 第5步：点击成员头像打开资料卡
+        rect = target_ctrl.BoundingRectangle
+        if not rect:
+            logger.error("无法获取成员位置")
+            return None
+
+        center_x = (rect.left + rect.right) // 2
+        center_y = (rect.top + rect.bottom) // 2
+
+        logger.info(f"点击成员 {member_name} at ({center_x}, {center_y})")
+
+        # 首先尝试右键菜单 -> "查看个人资料"（最可靠的方式）
+        logger.debug("尝试方式1: 右键菜单")
+        self._right_click_at_position(center_x, center_y)
+        time.sleep(1)
+
+        # 查找右键菜单
+        context_menu = None
+        for pattern in ['mmui::CPopupMenu', 'mmui::CMenu', 'mmui::PopupMenu']:
+            try:
+                menu = self.root.WindowControl(ClassName=pattern)
+                if menu.Exists(maxSearchSeconds=0.5):
+                    context_menu = menu
+                    logger.debug(f"找到右键菜单: {pattern}")
+                    break
+            except:
+                pass
+
+        if context_menu:
+            # 查找"查看个人资料"选项
+            for ctrl, depth in WalkControl(context_menu, includeTop=False, maxDepth=5):
+                try:
+                    name = ctrl.Name or ""
+                    if "查看个人资料" in name or "查看资料" in name:
+                        logger.info("找到'查看个人资料'选项，点击")
+                        ctrl.Click(simulateMove=False)
+                        time.sleep(1.5)
+                        break
+                except:
+                    pass
+        else:
+            # 如果没有右键菜单，尝试直接单击
+            logger.debug("尝试方式2: 直接单击")
+            self._close_popup()
+            time.sleep(0.3)
+            self._click_at_position(center_x, center_y)
+            time.sleep(1.5)
+
+        # 第6步：查找资料卡窗口
+        profile_card = None
+        profile_patterns = [
+            'mmui::ProfileUniquePop',
+            'mmui::ContactProfileView',
+            'mmui::ProfileCardView',
+        ]
+
+        for pattern in profile_patterns:
+            try:
+                ctrl = self.root.WindowControl(ClassName=pattern)
+                if ctrl.Exists(maxSearchSeconds=0.5):
+                    profile_card = ctrl
+                    logger.debug(f"找到资料卡窗口: {pattern}")
+                    break
+            except:
+                pass
+
+        # 如果没有找到资料卡，可能打开了私聊窗口
+        if not profile_card:
+            logger.debug("未找到资料卡，检查是否打开了私聊窗口")
+            # 私聊窗口的名称就是成员昵称
+            try:
+                window_name = self.root.Name
+                if window_name and window_name != self._get_group_display_name(group_name):
+                    logger.info(f"打开了私聊窗口: {window_name}")
+                    # 在私聊窗口中查找"更多信息"或直接从UI中查找微信ID
+                    # 先尝试按两次ESC回到群聊
+                    self._close_popup()
+                    time.sleep(0.5)
+                    # 关闭私聊后重新打开群详情
+                    info_view = self._open_and_focus_group_detail(group_name)
+                    if info_view:
+                        time.sleep(0.5)
+                        # 在群详情中查找该成员，尝试其他方式
+                        pass
+            except:
+                pass
+
+        if not profile_card:
+            logger.error("未找到资料卡窗口")
+            self._close_popup()
+            return None
+
+        # 第7步：从资料卡中提取微信号
+        wxid = None
+
+        try:
+            # 深度搜索微信号控件（只匹配以 wxid_ 开头的）
+            for ctrl, depth in WalkControl(profile_card, includeTop=False, maxDepth=10):
+                try:
+                    if ctrl.ClassName == 'mmui::ContactProfileTextView':
+                        name = ctrl.Name or ""
+                        # 微信号必须以 wxid_ 开头
+                        if name.startswith('wxid_'):
+                            wxid = name
+                            logger.debug(f"找到微信号: {wxid}")
+                            break
+                except:
+                    pass
+        except Exception as e:
+            logger.error(f"提取微信号失败: {e}")
+
+        # 第8步：关闭资料卡
+        self._close_popup()
+
+        if wxid:
+            logger.info(f"成功获取 {member_name} 的微信ID: {wxid}")
+        else:
+            logger.warning(f"未能获取 {member_name} 的微信ID（可能未公开）")
+
+        return wxid
+
+    def _close_popup(self) -> None:
+        """关闭弹出的资料卡或其他弹窗（按 ESC）"""
+        try:
+            win32api.keybd_event(win32con.VK_ESCAPE, 0, 0, 0)
+            time.sleep(0.1)
+            win32api.keybd_event(win32con.VK_ESCAPE, 0, win32con.KEYEVENTF_KEYUP, 0)
+            time.sleep(0.3)
+        except Exception as e:
+            logger.debug(f"关闭弹窗失败: {e}")
 
     def _open_group_detail(self) -> bool:
         """打开群详情面板。"""
